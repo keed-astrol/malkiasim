@@ -1,0 +1,27 @@
+<package format="3">
+  <name>robodojo</name>
+  <version>1.0.0</version>
+  <description>
+    URDF description package for the RoboDojo robot. This package contains
+    configuration data, 3D models, URDF files, and ROS 2 launch files.
+  </description>
+  <maintainer email="keedastro@users.noreply.github.com">keedastro</maintainer>
+  <license>BSD</license>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>gamefield</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>ros_gz_sim</exec_depend>
+  <exec_depend>ros_gz_bridge</exec_depend>
+  <exec_depend>robot_state_publisher</exec_depend>
+  <exec_depend>rmw_zenoh_cpp</exec_depend>
+  <exec_depend>rviz2</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>slam_toolbox</exec_depend>
+  <export>
+    <architecture_independent />
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

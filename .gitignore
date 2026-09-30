@@ -1,0 +1,24 @@
+# ROS 2 and colcon build output
+build/
+install/
+log/
+
+# Local workspace and editor settings
+.omx/
+.vscode/
+
+# Python caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# CMake and compilation artifacts
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+
+# Temporary editor and OS files
+*.swp
+*.swo
+.DS_Store
