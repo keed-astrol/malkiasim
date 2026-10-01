@@ -1,0 +1,12 @@
+digraph G {
+"base_link" -> "back_left_wheel"[label=" Broadcaster: default_authority\nAverage rate: 15.203\nBuffer length: 4.933\nMost recent transform: 1790846880.651408\nOldest transform: 1790846875.71801\n"];
+"odom" -> "base_link"[label=" Broadcaster: default_authority\nAverage rate: 50.216\nBuffer length: 4.64\nMost recent transform: 6.6\nOldest transform: 1.96\n"];
+"base_link" -> "back_right_wheel"[label=" Broadcaster: default_authority\nAverage rate: 15.203\nBuffer length: 4.933\nMost recent transform: 1790846880.651408\nOldest transform: 1790846875.71801\n"];
+"base_link" -> "front_left_wheel"[label=" Broadcaster: default_authority\nAverage rate: 15.203\nBuffer length: 4.933\nMost recent transform: 1790846880.651408\nOldest transform: 1790846875.71801\n"];
+"base_link" -> "front_right_wheel"[label=" Broadcaster: default_authority\nAverage rate: 15.203\nBuffer length: 4.933\nMost recent transform: 1790846880.651408\nOldest transform: 1790846875.71801\n"];
+"base_link" -> "lidar_link"[label=" Broadcaster: default_authority\nAverage rate: 10000.0\nBuffer length: 0.0\nMost recent transform: 0.0\nOldest transform: 0.0\n"];
+edge [style=invis];
+ subgraph cluster_legend { style=bold; color=black; label ="view_frames Result";
+"Recorded at time: 1790846880.7108967"[ shape=plaintext ] ;
+}->"odom";
+}

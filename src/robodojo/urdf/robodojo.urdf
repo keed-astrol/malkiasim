@@ -337,6 +337,7 @@
       name="lidar"
       type="gpu_lidar">
       <topic>/scan</topic>
+      <gz_frame_id>lidar_link</gz_frame_id>
       <update_rate>10</update_rate>
       <ray>
         <scan>

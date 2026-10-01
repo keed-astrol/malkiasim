@@ -17,10 +17,6 @@ def generate_launch_description():
     slam_config = package_share / 'config' / 'slam.yaml'
 
     return LaunchDescription([
-        ExecuteProcess(
-            cmd=['ros2', 'run', 'rmw_zenoh_cpp', 'rmw_zenohd'],
-            output='screen',
-        ),
         SetEnvironmentVariable(
             name='GZ_SIM_RESOURCE_PATH',
             value=f'{package_share.parent}:{gamefield_share / "models"}',
@@ -35,7 +31,8 @@ def generate_launch_description():
             package='robot_state_publisher',
             executable='robot_state_publisher',
             name='robot_state_publisher',
-            parameters=[{'robot_description': robot_description.read_text()}],
+            parameters=[{'robot_description': robot_description.read_text()}
+                        ],
         ),
         Node(
             package='robodojo',
@@ -60,6 +57,7 @@ def generate_launch_description():
             name='rviz2',
             arguments=['-d', str(rviz_config)],
             output='screen',
+            parameters=[{'use_sim_time': True}],
         ),
         Node(
             package='ros_gz_sim',
@@ -79,7 +77,7 @@ def generate_launch_description():
             package='slam_toolbox',
             executable='async_slam_toolbox_node',
             name='slam_toolbox',
-            parameters=[slam_config],
+            parameters=[slam_config, {'use_sim_time': True}],
             output='screen',
         ),
     ])

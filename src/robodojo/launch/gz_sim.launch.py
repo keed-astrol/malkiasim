@@ -16,10 +16,6 @@ def generate_launch_description():
     rviz_config = package_share / 'config' / 'robodojo.rviz'
 
     return LaunchDescription([
-        ExecuteProcess(
-            cmd=['ros2', 'run', 'rmw_zenoh_cpp', 'rmw_zenohd'],
-            output='screen',
-        ),
         SetEnvironmentVariable(
             name='GZ_SIM_RESOURCE_PATH',
             value=f'{package_share.parent}:{gamefield_share / "models"}',
