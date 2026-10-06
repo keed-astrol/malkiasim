@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-
+#/home/keedastro/dojourdf/src/robodojo/robodojo/joint_state_publisher_node.py
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import JointState

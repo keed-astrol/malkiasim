@@ -1,3 +1,4 @@
+#/home/keedastro/dojourdf/src/robodojo/launch/slam.launch.py
 from pathlib import Path
 
 from ament_index_python.packages import get_package_share_directory
@@ -15,6 +16,7 @@ def generate_launch_description():
     world = gamefield_share / 'worlds' / 'gamefield.world'
     rviz_config = package_share / 'config' / 'robodojo.rviz'
     slam_config = package_share / 'config' / 'slam.yaml'
+    ekf_config = package_share / 'config' / 'ekf.yaml'
 
     return LaunchDescription([
         SetEnvironmentVariable(
@@ -27,30 +29,39 @@ def generate_launch_description():
             ),
             launch_arguments={'gz_args': f'-r {world}'}.items(),
         ),
+        
         Node(
             package='robot_state_publisher',
             executable='robot_state_publisher',
-            name='robot_state_publisher',
-            parameters=[{'robot_description': robot_description.read_text()}
-                        ],
+            parameters=[{
+                'robot_description': robot_description.read_text(),
+                'use_sim_time': True,
+            }],
         ),
-        Node(
-            package='robodojo',
-            executable='joint_state_publisher_custom',
-            name='joint_state_publisher_custom',
-            output='screen',
-        ),
+        # joint_state_publisher_custom removed: real joint states come from Gazebo
         Node(
             package='ros_gz_bridge',
             executable='parameter_bridge',
             arguments=[
+                '/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock',
                 '/cmd_vel@geometry_msgs/msg/Twist]gz.msgs.Twist',
                 '/scan@sensor_msgs/msg/LaserScan[gz.msgs.LaserScan',
                 '/odom@nav_msgs/msg/Odometry[gz.msgs.Odometry',
-                '/tf@tf2_msgs/msg/TFMessage[gz.msgs.Pose_V',
+                '/imu@sensor_msgs/msg/Imu[gz.msgs.IMU',
+                '/joint_states@sensor_msgs/msg/JointState[gz.msgs.Model',
             ],
+            parameters=[{'use_sim_time': True}],
             output='screen',
         ),
+        Node(
+            package='robot_localization',
+            executable='ekf_node',
+            name='ekf_filter_node',
+            parameters=[ekf_config, {'use_sim_time': True}],
+            output='screen',
+        ),
+        
+        
         Node(
             package='rviz2',
             executable='rviz2',
@@ -72,6 +83,19 @@ def generate_launch_description():
             ],
             output='screen',
         ),
+         Node(
+            package='nav2_lifecycle_manager',
+            executable='lifecycle_manager',
+            name='lifecycle_manager_slam',
+            parameters=[
+                {
+                    'use_sim_time': True,
+                    'autostart': True,
+                    'node_names': ['slam_toolbox'],
+                },
+            ],
+            output='screen',
+        ),
         # --- SLAM Toolbox ---
         Node(
             package='slam_toolbox',
@@ -80,4 +104,5 @@ def generate_launch_description():
             parameters=[slam_config, {'use_sim_time': True}],
             output='screen',
         ),
+        
     ])
