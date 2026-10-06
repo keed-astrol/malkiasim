@@ -27,7 +27,7 @@ slam_toolbox:
 
     # Laser params
     min_laser_range: 0.15          # lidar min is 0.1; drop the closest returns
-    max_laser_range: 12.0          # long grazing-angle hits cause speckle
+    max_laser_range: 8.0          # long grazing-angle hits cause speckle
     minimum_time_interval: 0.2     # lidar runs at 10 Hz
     transform_timeout: 0.2
     tf_buffer_duration: 30.0
@@ -48,8 +48,8 @@ slam_toolbox:
     loop_search_maximum_distance: 3.0
     loop_match_minimum_chain_size: 10
     loop_match_maximum_variance_coarse: 3.0
-    loop_match_minimum_response_coarse: 0.35
-    loop_match_minimum_response_fine: 0.45
+    loop_match_minimum_response_coarse: 0.30
+    loop_match_minimum_response_fine: 0.40
     loop_search_space_dimension: 8.0
     loop_search_space_resolution: 0.05
     loop_search_space_smear_deviation: 0.03
