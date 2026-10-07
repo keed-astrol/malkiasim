@@ -289,7 +289,7 @@
     </visual>
     <collision>
       <origin
-        xyz="-0.042603 0.099966 -0.033562"
+        xyz="-0.042603 -0.099966 -0.033562"
         rpy="0 0 0" />
       <geometry>
         <mesh
@@ -329,7 +329,7 @@
           scale="0.001 0.001 0.001" />
       </geometry>
       <material name="imu_material">
-        <color rgba="128 0.8 0.8 1" />
+        <color rgba="0.5 0.8 0.8 1" />
       </material>
     </visual>
     <collision>
