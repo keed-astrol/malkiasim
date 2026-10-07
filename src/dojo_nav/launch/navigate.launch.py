@@ -99,45 +99,90 @@ def generate_launch_description():
         }.items(),
     )
 
-    nav2_bringup = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            str(
-                Path(get_package_share_directory('nav2_bringup'))
-                / 'launch'
-                / 'navigation_launch.py'
-            )
-        ),
-        launch_arguments={
-            'use_sim_time': 'true',
-            'params_file': str(nav2_cfg),
-            'autostart': 'true',
-        }.items(),
-    )
+    nav_remaps = [('/tf', 'tf'), ('/tf_static', 'tf_static')]
+    nav_params = [str(nav2_cfg), {'use_sim_time': True}]
 
-    lifecycle_manager = Node(
-        package='nav2_lifecycle_manager',
-        executable='lifecycle_manager',
-        name='lifecycle_manager_dojo_nav',
-        parameters=[{
-            'use_sim_time': True,
-            'autostart': True,
-            'node_names': [
-                'map_server',
-                'amcl',
-                'controller_server',
-                'smoother_server',
-                'planner_server',
-                'route_server',
-                'behavior_server',
-                'velocity_smoother',
-                'collision_monitor',
-                'bt_navigator',
-                'waypoint_follower',
-                'docking_server',
+    nav_nodes = [
+        Node(
+            package='nav2_controller',
+            executable='controller_server',
+            output='screen',
+            parameters=nav_params,
+            remappings=nav_remaps + [('cmd_vel', 'cmd_vel_nav')],
+        ),
+        Node(
+            package='nav2_smoother',
+            executable='smoother_server',
+            output='screen',
+            parameters=nav_params,
+            remappings=nav_remaps,
+        ),
+        Node(
+            package='nav2_planner',
+            executable='planner_server',
+            output='screen',
+            parameters=nav_params,
+            remappings=nav_remaps,
+        ),
+        Node(
+            package='nav2_behaviors',
+            executable='behavior_server',
+            output='screen',
+            parameters=nav_params,
+            remappings=nav_remaps + [('cmd_vel', 'cmd_vel_nav')],
+        ),
+        Node(
+            package='nav2_bt_navigator',
+            executable='bt_navigator',
+            output='screen',
+            parameters=nav_params,
+            remappings=nav_remaps,
+        ),
+        Node(
+            package='nav2_waypoint_follower',
+            executable='waypoint_follower',
+            output='screen',
+            parameters=nav_params,
+            remappings=nav_remaps,
+        ),
+        Node(
+            package='nav2_velocity_smoother',
+            executable='velocity_smoother',
+            output='screen',
+            parameters=nav_params,
+            remappings=nav_remaps + [
+                ('cmd_vel', 'cmd_vel_nav'),
+                ('cmd_vel_smoothed', 'cmd_vel_smoothed'),
             ],
-        }],
-        output='screen',
-    )
+        ),
+        Node(
+            package='nav2_collision_monitor',
+            executable='collision_monitor',
+            output='screen',
+            parameters=nav_params,
+            remappings=nav_remaps,
+        ),
+        Node(
+            package='nav2_lifecycle_manager',
+            executable='lifecycle_manager',
+            name='lifecycle_manager_navigation',
+            output='screen',
+            parameters=[{
+                'use_sim_time': True,
+                'autostart': True,
+                'node_names': [
+                    'controller_server',
+                    'smoother_server',
+                    'planner_server',
+                    'behavior_server',
+                    'bt_navigator',
+                    'waypoint_follower',
+                    'velocity_smoother',
+                    'collision_monitor',
+                ],
+            }],
+        ),
+    ]
 
     # ─── RViz with nav config ───
     rviz = Node(
@@ -167,7 +212,7 @@ def generate_launch_description():
         # Start localization and navigation after the simulator and robot TF exist.
         TimerAction(
             period=3.0,
-            actions=[localization, nav2_bringup, lifecycle_manager],
+            actions=[localization, *nav_nodes],
         ),
         rviz,
     ])
