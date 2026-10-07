@@ -363,6 +363,9 @@
     <topic>/cmd_vel</topic>
     <odom_topic>/odom</odom_topic>
     <frame_id>odom</frame_id>
+    <max_linear_acceleration>0.5</max_linear_acceleration>
+    <max_angular_acceleration>1.0</max_angular_acceleration>
+    <max_angular_velocity>1.0</max_angular_velocity>
     <child_frame_id>base_footprint</child_frame_id>
     <odom_publish_frequency>30</odom_publish_frequency>
     <tf_topic>/tf_raw</tf_topic>   <!-- never bridged, so the EKF owns odom TF -->
