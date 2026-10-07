@@ -54,7 +54,26 @@ The exact meaning of back-left depends on the world coordinate orientation.
 ros2 launch robodojo slam.launch.py
 ```
 
-This starts the Gazebo simulation and SLAM Toolbox using `src/robodojo/config/slam.yaml`. Drive the robot with `/cmd_vel`; lidar, odometry, transforms, and the map are available through the configured ROS topics.
+This starts Gazebo, the robot localization EKF, and SLAM Toolbox using `src/robodojo/config/slam.yaml`. Drive the robot with `/cmd_vel`; SLAM Toolbox uses `/scan` and the `odom` to `base_link` transform to build `/map`.
+
+The Gazebo world must load the `gz-sim-imu-system` plugin for the robot IMU sensor to produce samples. The SLAM launch bridges the simulator IMU to ROS as `/imu` and starts the EKF, which publishes filtered odometry on `/odometry/filtered`.
+
+Verify the sensor and SLAM inputs in another sourced terminal:
+
+```bash
+ros2 topic hz /imu
+ros2 topic hz /scan
+ros2 topic echo /odometry/filtered --once
+ros2 topic echo /map --once
+```
+
+If `/imu` exists but `ros2 topic hz /imu` receives no messages, restart the simulation after rebuilding so Gazebo loads the current world file:
+
+```bash
+colcon build --symlink-install
+source install/setup.bash
+ros2 launch robodojo slam.launch.py
+```
 
 ## Useful topics
 
