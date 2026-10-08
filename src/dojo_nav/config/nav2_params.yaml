@@ -186,7 +186,7 @@ local_costmap:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 3.0
         # Lower this if the planner refuses to go through narrow maze corridors
-        inflation_radius: 0.35
+        inflation_radius: 0.10
       always_send_full_costmap: true
 
 global_costmap:
@@ -224,7 +224,7 @@ global_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 3.0
-        inflation_radius: 0.35
+        inflation_radius: 0.10
       always_send_full_costmap: true
 
 map_server:
