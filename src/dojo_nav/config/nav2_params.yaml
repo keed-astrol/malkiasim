@@ -39,11 +39,11 @@ amcl:
     sigma_hit: 0.2
     tf_broadcast: true
     transform_tolerance: 1.0
-    update_min_a: 0.2
-    update_min_d: 0.1
-    z_hit: 0.5
+    update_min_a: 0.1
+    update_min_d: 0.05
+    z_hit: 0.95
     z_max: 0.05
-    z_rand: 0.5
+    z_rand: 0.05
     z_short: 0.05
     # FIX: AMCL does not publish map->odom until it has an initial pose.
     # These values must match where the robot spawns, in MAP coordinates.
