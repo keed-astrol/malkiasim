@@ -367,7 +367,7 @@
     <max_angular_acceleration>1.0</max_angular_acceleration>
     <max_angular_velocity>1.0</max_angular_velocity>
     <child_frame_id>base_footprint</child_frame_id>
-    <odom_publish_frequency>30</odom_publish_frequency>
+    <odom_publish_frequency>100</odom_publish_frequency>
     <tf_topic>/tf_raw</tf_topic>   <!-- never bridged, so the EKF owns odom TF -->
   </plugin>
   <plugin filename="gz-sim-joint-state-publisher-system"
@@ -391,7 +391,7 @@
       type="gpu_lidar">
       <topic>/scan</topic>
       <gz_frame_id>lidar_link</gz_frame_id>
-      <update_rate>10</update_rate>
+      <update_rate>100</update_rate>
       <ray>
         <scan>
           <horizontal>
