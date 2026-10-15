@@ -20,7 +20,7 @@ def generate_launch_description():
     pkg_dojo_nav = Path(get_package_share_directory('dojo_nav'))
     pkg_gz_sim = Path(get_package_share_directory('ros_gz_sim'))
 
-    world = pkg_gamefield / 'worlds' / 'gamefield.world'
+    world = pkg_gamefield / 'worlds' / 'auto_arena.world'
     robot_desc = pkg_robodojo / 'urdf' / 'robodojo.urdf'
     ekf_cfg = pkg_robodojo / 'config' / 'ekf.yaml'
     nav2_cfg = pkg_dojo_nav / 'config' / 'nav2_params.yaml'
