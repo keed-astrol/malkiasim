@@ -152,6 +152,38 @@ SLAM mode uses `src/robodojo/config/slam.yaml` and is managed by
 built live has no prior information — the robot only trusts what the lidar has
 seen, so expect it to make a few detours before the frontier goals settle down.
 
+If `localization:=slam` runs but the costmap logs
+
+```
+[global_costmap.global_costmap]: Received map message is malformed. Rejecting.
+```
+
+then `/map` is being published as a **0×0 grid**. `slam_toolbox` only resizes its
+message when the grid dimensions change, so a mapper that has not received a
+single scan publishes `width = height = 0`, and Jazzy's `nav2_util::validateMsg()`
+rejects any `MapMetaData` with `width == 0 || height == 0`. The global costmap
+then has no map at all (`Can't update static costmap layer, no map received`,
+`Robot is out of bounds of the costmap`) and nothing can plan.
+
+The mapper stays empty when scans never reach it: `slam_toolbox` subscribes
+through a tf2 `MessageFilter` whose default queue holds **one** scan, so a burst
+overflows it (the lidar was configured at 100 Hz, delivering ~34 Hz of 720-ray
+scans at ~6 % real-time):
+
+```
+[slam_toolbox]: Message Filter dropping message: frame 'lidar_link' ... queue is full
+```
+
+```bash
+ros2 topic echo /map --field info --once     # width/height 0 = no scans processed yet
+ros2 topic echo /pose --once                 # silent = slam_toolbox has processed no scan
+ros2 topic hz /scan                          # want ~15 Hz, not 34
+ros2 run tf2_ros tf2_echo odom lidar_link    # the transform the filter waits for
+```
+
+The lidar now runs at 15 Hz (`robodojo.urdf`) and `slam.yaml` sets
+`scan_queue_size: 5` / `transform_timeout: 0.5` so scans survive the queue.
+
 ---
 
 ## Autonomous maze navigation
@@ -392,6 +424,40 @@ rear-cone minima are still published as `min_scan_range_all` /
 stop the robot reverses (or spins in place when the rear is also blocked) until
 the way ahead is clear.
 
+**The robot wedges on the plateau ramps, and the planner reports `Failed to
+create a plan from potential when a legal potential was found`** — this is a
+sensor-geometry trap, not a planner bug. The lidar is a horizontal 2D scanner
+mounted **on** the robot, 0.1975 m above the floor. When the rover pitches on the
+arena's plateau ramps (12 %, ~7°) its beams hit the floor ahead at
+`lidar_height / tan(pitch)`, so the floor must stay outside the obstacle layer's
+marking range:
+
+```
+obstacle_max_range < lidar_height / tan(max_pitch)
+       1.2 m       < 0.1975 m   / tan(7 deg) = 1.61 m
+```
+
+Otherwise the floor is painted into the costmap as an obstacle wall ~1.6 m in
+front of the robot — exactly across the corridor it is trying to drive down.
+Both costmaps therefore use `obstacle_max_range: 1.2`, which makes the floor
+invisible for pitches up to 9.3° and keeps ~0.5 m of headroom over the real 7°
+ramp. `raytrace_max_range` stays 3.0 so cells are still cleared, and the
+`collision_monitor` watches the raw scan for genuine collisions, so shortening
+the marking range costs no safety.
+
+The plateaus (floor mesh, world frame):
+
+| plateau | world x | world y | shape |
+|---|---|---|---|
+| A | 0.25 … 1.65 | ≈ −0.6 | 5 cm high, ramps at both x ends |
+| B | −1.2 … 0.1 | ≈ 1.2 | 5 cm high, ramps at both x ends |
+
+The plateau **sides** are 5 cm vertical faces: invisible to a lidar mounted at
+0.198 m, and too narrow to squeeze past (the gap beside them is ~0.24 m against a
+0.286 m rover), so the ramps are the only way across. `/tmp/opencode/test_ramp_geometry.py`
+re-derives all of this from the URDF and the floor mesh and fails if
+`obstacle_max_range` ever grows back above the floor-return distance.
+
 **The robot circles in place and won't enter a doorway** — this is a
 recovery/authority problem rather than a planning one, and there are three
 places to look:
@@ -409,12 +475,27 @@ places to look:
   exactly where it needs to commit. It is set to 0.5 s here.
 
 Wall keep-off is a compromise: the hard keep-out is the footprint's **inscribed
-radius** (0.138 m), which no parameter can reduce. `inflation_radius` (0.22 m)
-and `cost_scaling_factor` (8.0) only shape the *preference* for the corridor
-centre — a steep falloff and a tight radius make the robot willing to squeeze
-past walls, they do not let it clip them. If a passage is genuinely narrower
-than the robot (< ~0.30 m), no parameter change will fix it; the honest fixes
-are a smaller rover or a wider map.
+radius**, which no parameter can reduce. `inflation_radius` (0.22 m) and
+`cost_scaling_factor` (8.0) only shape the *preference* for the corridor centre
+— a steep falloff and a tight radius make the robot willing to squeeze past
+walls, they do not let it clip them.
+
+The arena is genuinely tighter than the rover. Measuring the walls mesh gives
+corridors of median **0.42 m** width (25th percentile 0.22 m) against a
+0.271 × 0.286 m rover, and **36 %** of the free floor has less clearance than the
+real 0.136 m inscribed radius — the planner treats it as lethal. At the true
+footprint the channel for the robot's centre in a median corridor is only
+~0.15 m, so NavFn frequently reports no plan at all.
+
+The costmaps therefore plan with a **deliberately smaller** footprint
+(`[[0.125, 0.115], …]`, inscribed 0.115 m), which buys ~4.2 cm of channel per
+corridor. The cost is that DWB will accept trajectories where the wheels overlap
+a wall by up to ~0.026 m, so expect scraping in tight spots. The
+`collision_monitor` is deliberately **not** shrunk with it: it uses a static
+polygon at the real size (`0.145 × 0.150`) instead of
+`/local_costmap/published_footprint`, so the emergency stop still believes the
+rover is as wide as it is. Passages much below the rover's 0.286 m width remain
+impossible — there the honest fixes are a smaller rover or a wider world.
 
 **Clean rebuild**
 
@@ -454,8 +535,26 @@ source install/setup.bash
 * Turning is much tighter: DWB `max_vel_theta` 2.0 rad/s with ±4.0 rad/s²
   limits, matching limits in the velocity smoother, behaviour server and the
   Gazebo diff-drive plugin. The robot also plans with its **measured footprint**
-  (`0.276 × 0.286 m`) rather than a circumscribed `robot_radius`, so it no longer
-  keeps a phantom 0.18 m of clearance on every side.
+  (`0.272 × 0.281 m`, from the meshes) rather than a circumscribed
+  `robot_radius`, so it no longer keeps a phantom 0.18 m of clearance on every
+  side.
+* Fixed the ramp trap that wedged the robot and made the planner report
+  `Failed to create a plan from potential when a legal potential was found`: with
+  `obstacle_max_range: 2.5` the lidar painted the plateau ramps' floor into the
+  costmap as a phantom wall ~1.6 m ahead. Both obstacle layers now stop marking
+  at 1.2 m (see Troubleshooting).
+* Fixed `localization:=slam` never getting a map: with an empty mapper
+  `slam_toolbox` publishes a 0×0 `/map`, which Jazzy's `nav2_util::validateMsg()`
+  rejects as `malformed`, leaving the global costmap with no map. The lidar went
+  from 100 Hz to 15 Hz and `slam.yaml` gained `scan_queue_size: 5` /
+  `transform_timeout: 0.5` so scans survive the tf2 `MessageFilter` queue.
+* The planners now run a **smaller footprint than the metal** (inscribed 0.115 m
+  instead of 0.136 m) because the maze's median corridor is 0.42 m against a
+  0.286 m rover. The `collision_monitor` keeps the true footprint via a static
+  polygon, so the emergency stop is not weakened.
+* Spawn moved to world `(-2.50, -1.10)` (spawn wall clearance 0.22 m → 0.44 m)
+  with the AMCL `initial_pose` updated to match, using the measured map frame
+  `map = world + (2.70, 1.30)`.
 * `EXPLORE` was a stub and `complete_current_mission_step()` never fired: the
   mission node attached its result callback to `send_goal_async`, which resolves
   when the goal is *accepted*, not when it finishes. Goals now chain through

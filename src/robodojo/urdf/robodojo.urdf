@@ -387,7 +387,12 @@
       type="gpu_lidar">
       <topic>/scan</topic>
       <gz_frame_id>lidar_link</gz_frame_id>
-      <update_rate>100</update_rate>
+      <!-- 15 Hz, not 100: at 100 Hz the sim was publishing ~34 Hz of 720-ray
+           scans, which starved the CPU (sim fell to ~6% real time), made scan
+           timing bursty, and overflowed slam_toolbox's tf2 MessageFilter queue
+           (scan_queue_size default 1) -> no scan ever reached the mapper ->
+           slam_toolbox published a 0x0 map -> Nav2 rejected it as malformed. -->
+      <update_rate>15</update_rate>
       <ray>
         <scan>
           <horizontal>

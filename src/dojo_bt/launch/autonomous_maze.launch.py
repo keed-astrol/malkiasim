@@ -89,8 +89,8 @@ def generate_launch_description():
         arguments=[
             '-name', 'robodojo',
             '-topic', 'robot_description',
-            '-x', '-2.7',
-            '-y', '-1.2',
+            '-x', '-2.50',
+            '-y', '-1.10',
             '-z', '0.6',
             '-Y', '0',
         ],

@@ -28,8 +28,14 @@ slam_toolbox:
     # Laser params
     min_laser_range: 0.15          # lidar min is 0.1; drop the closest returns
     max_laser_range: 8.0          # long grazing-angle hits cause speckle
-    minimum_time_interval: 0.2     # lidar runs at 10 Hz
-    transform_timeout: 0.2
+    minimum_time_interval: 0.2     # process at most 5 scans/s (lidar is 15 Hz)
+    # slam_toolbox subscribes through a tf2 MessageFilter that queues scans until
+    # the odom -> lidar_link transform for their stamp exists. The defaults
+    # (scan_queue_size 1, transform_timeout 0.2) dropped the scan in a burst
+    # ("discarding message because the queue is full"), so the mapper never
+    # received a scan: it published a 0x0 map, which Nav2 rejects as malformed.
+    scan_queue_size: 5
+    transform_timeout: 0.5
     tf_buffer_duration: 30.0
     stack_size_to_use: 40000000
 
