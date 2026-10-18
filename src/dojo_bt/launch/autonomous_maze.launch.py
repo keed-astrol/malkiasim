@@ -13,6 +13,7 @@ from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
+    ExecuteProcess,
     IncludeLaunchDescription,
     SetEnvironmentVariable,
     TimerAction,
@@ -278,6 +279,23 @@ def generate_launch_description():
     )
 
     # ─── RViz with nav config ───────────────────────────────────
+    # Point the Gazebo GUI camera at the rover, the same as right-clicking the
+    # model and choosing Follow. /gui/follow is a gz-transport service, so it
+    # can only be called once the GUI exists (12 s is well after spawn).
+    follow_camera = TimerAction(
+        period=12.0,
+        actions=[ExecuteProcess(
+            cmd=[
+                'gz', 'service', '-s', '/gui/follow',
+                '--reqtype', 'gz.msgs.StringMsg',
+                '--reptype', 'gz.msgs.Boolean',
+                '--timeout', '4000',
+                '--req', 'data: "robodojo"',
+            ],
+            output='screen',
+        )],
+    )
+
     rviz = Node(
         package='rviz2',
         executable='rviz2',
@@ -335,6 +353,7 @@ def generate_launch_description():
             period=10.0,
             actions=[localization, *slam_localization, *nav_nodes, autonomous_mission],
         ),
+        follow_camera,
         rviz,
     ])
 

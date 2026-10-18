@@ -28,7 +28,10 @@ slam_toolbox:
     # Laser params
     min_laser_range: 0.15          # lidar min is 0.1; drop the closest returns
     max_laser_range: 8.0          # long grazing-angle hits cause speckle
-    minimum_time_interval: 0.2     # process at most 5 scans/s (lidar is 15 Hz)
+    # 2 scans/s. This is the only brake on mapping while the rover is stalled
+    # (minimum_travel_distance is 0 so a parked rover still bootstraps a map);
+    # at 5 scans/s a rover pushing a wall smeared the map badly.
+    minimum_time_interval: 0.5
     # slam_toolbox subscribes through a tf2 MessageFilter that queues scans until
     # the odom -> lidar_link transform for their stamp exists. The defaults
     # (scan_queue_size 1, transform_timeout 0.2) are too tight when the EKF is
