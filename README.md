@@ -66,10 +66,11 @@ Source `install/setup.bash` in every new terminal before launching anything.
 | `ros2 launch robodojo gz_sim.launch.py` | Gazebo gamefield + robot + bridge + RViz |
 | `ros2 launch robodojo slam.launch.py` | Gazebo + EKF + SLAM Toolbox (builds `/map`) |
 | `ros2 launch dojo_nav navigate.launch.py` | Gazebo + EKF + full Nav2 stack + RViz, using a saved map |
-| `ros2 launch dojo_bt autonomous_maze.launch.py` | Everything above **plus** the custom BT and the autonomous mission node (`localization:=slam` to map live instead of using the saved map) |
+| `ros2 launch dojo_bt autonomous_maze.launch.py` | Everything above **plus** the custom BT and the autonomous mission node (`localization:=slam` to map live instead of using the saved map; `auto_explore:=false` to disable the automatic EXPLORE) |
 | `ros2 launch gamefield world_rviz.launch.py` | World inspection in RViz |
 
-The robot spawns at approximately `x = -2.7`, `y = -1.2`, `z = 0.6`, yaw `0`.
+The robot spawns at world `x = -2.50`, `y = -1.10`, `z = 0.6`, yaw `0` (map
+`(0.20, 0.20)`, which is the AMCL `initial_pose`).
 
 ### Gazebo GUI shows a black screen / the world dies instantly
 
@@ -165,24 +166,59 @@ rejects any `MapMetaData` with `width == 0 || height == 0`. The global costmap
 then has no map at all (`Can't update static costmap layer, no map received`,
 `Robot is out of bounds of the costmap`) and nothing can plan.
 
-The mapper stays empty when scans never reach it: `slam_toolbox` subscribes
-through a tf2 `MessageFilter` whose default queue holds **one** scan, so a burst
-overflows it (the lidar was configured at 100 Hz, delivering ~34 Hz of 720-ray
-scans at ~6 % real-time):
+Two separate faults produce that empty grid.
 
-```
-[slam_toolbox]: Message Filter dropping message: frame 'lidar_link' ... queue is full
-```
+**1. A parked rover maps nothing.** `slam_toolbox`'s `shouldProcessScan()` only
+accepts a scan after the robot has travelled `0.8 × minimum_travel_distance`,
+and the single "first measurement" pass does not make it into the published
+grid. With the default `minimum_travel_distance: 0.1` the rover therefore
+published a 0×0 map for as long as it sat still after launch — measured: `/map`
+stayed 0×0 for minutes, then jumped to 25×60 the moment the rover was nudged
+~0.3 m. Nav2 then rejects the map, the costmap has no static layer and `EXPLORE`
+never gets a frontier, so nothing ever moves: a deadlock. `slam.yaml` now sets
+`minimum_travel_distance: 0.0`, so scans are accepted on the
+`minimum_time_interval: 0.2` timer instead of on travel.
+
+**2. Scan bursts overflow the tf2 filter.** `slam_toolbox` subscribes through a
+tf2 `MessageFilter` whose default queue holds **one** scan; at 100 Hz the queue
+overflowed (`Message Filter dropping message: frame 'lidar_link' ... queue is
+full`). The lidar now runs at 15 Hz (`robodojo.urdf`) and `slam.yaml` sets
+`scan_queue_size: 5` / `transform_timeout: 0.5`.
+
+Verify with:
 
 ```bash
-ros2 topic echo /map --field info --once     # width/height 0 = no scans processed yet
-ros2 topic echo /pose --once                 # silent = slam_toolbox has processed no scan
-ros2 topic hz /scan                          # want ~15 Hz, not 34
+ros2 topic echo /map --field info --once     # width/height must be non-zero
+ros2 topic echo /pose --once                 # slam_toolbox's own pose estimate
+ros2 topic hz /scan                          # want ~15 Hz
 ros2 run tf2_ros tf2_echo odom lidar_link    # the transform the filter waits for
 ```
 
-The lidar now runs at 15 Hz (`robodojo.urdf`) and `slam.yaml` sets
-`scan_queue_size: 5` / `transform_timeout: 0.5` so scans survive the queue.
+Jazzy's `slam_toolbox` also logs
+
+```
+[lifecycle_manager_slam]: Server slam_toolbox was unable to be reached after 4.00s by bond
+```
+
+at activation. It is cosmetic here (the node is `active`, publishes `/map` and
+`/tf`); the bond handshake happens while `on_activate` is still starting the
+mapper threads.
+
+A full autonomous run has been saved as `maps/arena_slam.{pgm,yaml}`
+(124×65 cells @ 0.05 m) so you can drive the same arena in AMCL mode without
+mapping it again:
+
+```bash
+cd <repository root>
+ros2 launch dojo_bt autonomous_maze.launch.py localization:=amcl \
+  map:=$PWD/maps/arena_slam.yaml
+```
+
+One caveat: a SLAM-built map puts its origin at the pose where mapping started,
+so the spawn is at map `(0, 0)` in `arena_slam`, while the `initial_pose`
+hard-coded in `nav2_params.yaml` (0.20, 0.20) was measured for the shipped
+`maps/arena.yaml` (which uses `map = world + (2.70, 1.30)`). Edit the
+`initial_pose` params to `x: 0.0, y: 0.0` before using `arena_slam`.
 
 ---
 
@@ -239,6 +275,24 @@ to (from `map_server` in `amcl` mode, or `slam_toolbox` in `slam` mode):
 4. A frontier that fails or is rejected is **blacklisted** for 90 s and the
    mission continues with the next one, instead of giving up.
 
+In `slam` mode the robot **starts `EXPLORE` by itself**, about 5 s after launch,
+as soon as `/map` has real cells and a `map → base_footprint` transform exists —
+there is no need to publish `/dojo_mission` first:
+
+```bash
+ros2 launch dojo_bt autonomous_maze.launch.py localization:=slam
+#   [autonomous_mission_node]: Auto-start: EXPLORE after 5.1s (map 25x59)
+#   [autonomous_mission_node]: EXPLORE: heading to frontier (0.33, 1.16) of 3
+```
+
+Turn it off with `auto_explore:=false` (e.g. to drive goals by hand with RViz's
+*2D Goal Pose*; in `amcl` mode it is disabled automatically). Once the whole map
+is explored the mission ends on its own (`EXPLORE: map fully explored` → `IDLE`).
+
+The autostart waits for a non-empty map on purpose: `slam_toolbox` publishes an
+empty 0×0 grid until it has processed its first scan, and Nav2 rejects that
+(`Received map message is malformed`).
+
 Note that a *static, fully explored* map has no frontiers at all — with the
 shipped `maps/arena.yaml` an `EXPLORE` command finishes almost immediately. Use
 `localization:=slam` (or a map with unexplored regions) for it to do anything.
@@ -255,6 +309,13 @@ ros2 topic echo /dojo_mission/state    # JSON state machine snapshot
 `min_scan_range_rear`, `frontiers`, `goal_in_flight`, `pose_x`, `pose_y`,
 `current_yaw`. The Behavior Tree reads this topic for its collision/stuck
 decisions.
+
+Both topics are `std_msgs/String` messages whose payload is JSON, so `--field`
+cannot be used (there are no message fields to select); echo the whole message:
+
+```bash
+ros2 topic echo /dojo_mission/state --once
+```
 
 ---
 
@@ -275,14 +336,18 @@ controller_server ──► cmd_vel_nav
 `twist_mux` arbitrates so an emergency command always beats navigation commands.
 `/cmd_vel_emergency` has a **single writer**, `autonomous_mission_node`, and it
 publishes on it for one reason only: the hard-stop phase of a collision
-emergency and its timed reverse/spin escape manoeuvre.
+emergency (0.5 s). After that it goes **silent for 2.5 s** so `twist_mux` (0.5 s
+timeout) falls back to Nav2, whose tree withholds the controller via
+`IsCollisionImminent` and runs its own `BackUp`/`Spin` recovery. The gate is a
+stop, not a driver: re-driving the wheels from the mission node made the two
+layers take turns reversing.
 
 Keeping one writer matters: `twist_mux` passes the newest message on the
 highest-priority input, so a second publisher on the same topic would fight the
-mission node's escape (a fast zero-publisher would simply out-vote it). The
-`dojo_bt` `EmergencyStop` node is still registered for use in other trees, but
-the shipped tree deliberately does **not** publish zeros — it withholds
-controller commands via `IsCollisionImminent` and lets the mission node arbitrate.
+mission node. The `dojo_bt` `EmergencyStop` node is still registered for use in
+other trees, but the shipped tree deliberately does **not** publish zeros — it
+withholds controller commands via `IsCollisionImminent` and lets the mission node
+arbitrate.
 
 **Stuck recovery is owned by the tree, not by this node.** The `MissionStuck`
 branch of the BT runs `BackUp + Spin` through Nav2's behaviour server, which
@@ -385,6 +450,44 @@ ros2 topic pub --once /cmd_vel_emergency geometry_msgs/msg/Twist \
 or Gazebo is not running. Check for the bridge in the launch output, and that
 the launch printed no Gazebo errors.
 
+**`Detected jump back in time. Clearing TF buffer.` spam, and the rover drives
+into walls without stopping** — two `/clock` publishers are fighting, almost
+always a *leftover* `parameter_bridge` (and `twist_mux`) from an earlier run
+whose launch was only partially killed. Every backwards jump clears the TF
+buffers, so scans can no longer be transformed: the costmap obstacle layer goes
+blind, `collision_monitor` logs `Robot to stop due to invalid source`, and
+`slam_toolbox` drops its scans. Verify:
+
+```bash
+ros2 topic info /clock               # must be "Publisher count: 1"
+ros2 topic info /scan                # must be 1 as well
+ros2 node list | grep -c twist_mux   # must be 1
+```
+
+Grep the launch log for `jump back in time` — a healthy run has zero.
+
+**Restarting from scratch** — killing the wrong subset of nodes is what leaves
+those duplicates behind. Use one script for the whole set (`pkill -f` must not
+appear in the caller's own command line, or it kills the caller too):
+
+```bash
+cat > ~/robo_kill.sh <<'EOF'
+#!/usr/bin/env bash
+for pat in autonomous_maze.launch autonomous_mission_node parameter_bridge \
+  ros_gz_bridge component_container lifecycle_manager robot_state_publisher \
+  twist_mux slam_toolbox ekf_node "gz sim" rviz2 "ros2 launch" ros2-daemon; do
+  pkill -9 -f -- "$pat" 2>/dev/null
+done
+sleep 3
+EOF
+bash ~/robo_kill.sh
+ros2 daemon stop          # a daemon left inside the container holds the
+                          # podman overlay mount, which then cannot be remounted
+ros2 node list            # must be empty
+```
+
+Then `colcon build --symlink-install` and relaunch.
+
 **`model://gamefield_arena` not found** — rebuild so the model files are
 installed, and make sure `GZ_SIM_RESOURCE_PATH` includes the gamefield models
 directory. The launch files set this automatically; for a manual `gz sim`:
@@ -420,9 +523,10 @@ not the whole sweep. Using the global minimum looked "safer" but froze the robot
 in this arena: the maze walls beside and behind it are permanently inside the
 0.25 m emergency radius, so it held zero velocity forever. The whole-sweep and
 rear-cone minima are still published as `min_scan_range_all` /
-`min_scan_range_rear`, and the emergency state is escapable: after a 0.3 s hard
-stop the robot reverses (or spins in place when the rear is also blocked) until
-the way ahead is clear.
+`min_scan_range_rear`. The emergency exits once the front reaches
+`COLLISION_CLEAR_RANGE` (0.30 m) — deliberately below 0.40 m, because a 0.42 m
+corridor with a 0.28 m rover never offers 0.40 m of clear front and the rover
+then never left `EMERGENCY`.
 
 **The robot wedges on the plateau ramps, and the planner reports `Failed to
 create a plan from potential when a legal potential was found`** — this is a
@@ -520,11 +624,14 @@ source install/setup.bash
 * `/cmd_vel_emergency` is now actually connected: `collision_monitor` outputs
   `cmd_vel_safe` and `twist_mux` arbitrates it against the emergency topic before
   `/cmd_vel` reaches Gazebo.
-* The collision gate was made **directional** and **escapable**. It used the
-  minimum range over the whole 360° sweep, so in this arena (walls always within
-  25 cm to the side or rear) the robot sat in `EMERGENCY` publishing zeros
-  forever. It now watches the forward cone and, when blocked, stops briefly and
-  then backs away instead of latching.
+* The collision gate watches only the forward cone (±35°) and is a **stop, not
+  a driver**: it brakes for 0.5 s, then releases `/cmd_vel_emergency` for 2.5 s
+  so `twist_mux` hands control back to Nav2, whose tree withholds the controller
+  and runs its own `BackUp`/`Spin`. Driving the wheels from both layers made them
+  take turns reversing (the rover rocked back and forth), and holding the topic
+  at 10 Hz outranked Nav2 forever. The exit threshold is 0.30 m rather than
+  0.40 m: a 0.42 m corridor with a 0.28 m rover never offers 0.40 m of clear
+  front, which trapped it in `EMERGENCY` permanently.
 * Hard-coded, user-specific paths (`/home/keedastro/...`,
   `/home/damian/...`, `/opt/ros/kilted/...`) were removed from the launch files,
   `nav2_params.yaml` and `measure.py`; the default map is discovered from the
@@ -543,11 +650,16 @@ source install/setup.bash
   `obstacle_max_range: 2.5` the lidar painted the plateau ramps' floor into the
   costmap as a phantom wall ~1.6 m ahead. Both obstacle layers now stop marking
   at 1.2 m (see Troubleshooting).
-* Fixed `localization:=slam` never getting a map: with an empty mapper
-  `slam_toolbox` publishes a 0×0 `/map`, which Jazzy's `nav2_util::validateMsg()`
-  rejects as `malformed`, leaving the global costmap with no map. The lidar went
+* Fixed `localization:=slam` never getting a map. The decisive cause is
+  `slam_toolbox`'s travel gate: it adds no scan until the rover has moved
+  `0.8 × minimum_travel_distance`, and the single first-scan pass never reaches
+  the published grid, so a rover parked after launch published a 0×0 `/map`
+  forever — which Jazzy rejects as `malformed`, leaving the global costmap empty
+  and `EXPLORE` without frontiers. That is a deadlock, because the rover cannot
+  move without a map. `minimum_travel_distance: 0.0` makes the mapper work on
+  the `minimum_time_interval` timer instead of on travel. The lidar also went
   from 100 Hz to 15 Hz and `slam.yaml` gained `scan_queue_size: 5` /
-  `transform_timeout: 0.5` so scans survive the tf2 `MessageFilter` queue.
+  `transform_timeout: 0.5` so scan bursts do not overflow the tf2 `MessageFilter`.
 * The planners now run a **smaller footprint than the metal** (inscribed 0.115 m
   instead of 0.136 m) because the maze's median corridor is 0.42 m against a
   0.286 m rover. The `collision_monitor` keeps the true footprint via a static
@@ -567,3 +679,18 @@ source install/setup.bash
   recovery only bookkeeps and clears costmaps, leaving `BackUp + Spin` to the
   tree's `MissionStuck` branch. Stuck detection also counts rotation as progress
   and waits 12 s instead of 5 s.
+* `EXPLORE` starts by itself in `slam` mode (`auto_explore`, on by default):
+  ~5 s after launch, once `/map` has real cells and `map → base_footprint`
+  exists, the mission node enters `EXPLORING`. `auto_explore:=false` restores
+  manual `2D Goal Pose` driving; in `amcl` mode autostart is disabled.
+* Fixed a crash that made every `EXPLORE` mission die on its first tick:
+  `_last_frontier_attempt` was a `rclpy.time.Time` while the dispatcher
+  subtracted a float from it
+  (`TypeError: unsupported operand type(s) for -: 'float' and 'Time'`).
+* Replanning dropped to **0.5 Hz** (`RateController` in the tree) and the
+  translational limit to **0.20 m/s**: at 1 Hz / 0.26 m/s the global path
+  flipped between near-equal options in the tight divisions before the
+  controller could commit, which read as the rover dithering.
+* A full autonomous run mapped the whole arena and it is saved as
+  `maps/arena_slam.{pgm,yaml}` (124×65 @ 0.05 m) as a ready-made prior map for
+  `localization:=amcl`.

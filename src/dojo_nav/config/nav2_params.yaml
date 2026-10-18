@@ -114,14 +114,18 @@ controller_server:
       debug_trajectory_details: false
       min_vel_x: 0.0
       min_vel_y: 0.0
-      max_vel_x: 0.26
+      # 0.20 m/s: the arena corridors are ~0.42 m wide and the rover is 0.28 m,
+      # so there is no room for overshoot. 0.26 m/s made the rover arrive at
+      # gaps too hot, clip them and get wedged (gz then ejects it, which looks
+      # like a teleport). Turning stays fast - that is what shrinks the radius.
+      max_vel_x: 0.20
       max_vel_y: 0.0
       # Diff drive: a higher angular limit is what shrinks the turning radius
       # (radius = v/omega). At 0.26 m/s and 1.0 rad/s the robot needed 0.26 m
       # of space to turn, which does not fit a 0.5 m maze corner.
       max_vel_theta: 2.0
       min_speed_xy: 0.0
-      max_speed_xy: 0.26
+      max_speed_xy: 0.20
       min_speed_theta: 0.0
       acc_lim_x: 1.0
       acc_lim_y: 0.0

@@ -69,9 +69,12 @@ class AutonomousMissionNode(Node):
     (launch with localization:=slam).
     """
 
-    COLLISION_MIN_RANGE = 0.25       # meters
+    COLLISION_MIN_RANGE = 0.22       # meters: enter EMERGENCY
     COLLISION_WARN_RANGE = 0.50      # meters
-    COLLISION_CLEAR_RANGE = 0.40     # meters: hysteresis to exit EMERGENCY
+    # Exit threshold has to be reachable in this arena: a 0.42 m corridor with a
+    # 0.28 m rover never offers 0.40 m of clear front, so a 0.40 m clear range
+    # trapped the rover in EMERGENCY forever (spinning/stopping in a pocket).
+    COLLISION_CLEAR_RANGE = 0.30     # meters: leave EMERGENCY
 
     # Frontier exploration (EXPLORE)
     FRONTIER_MIN_CELLS = 4           # ignore frontier specks
@@ -87,16 +90,15 @@ class AutonomousMissionNode(Node):
     # maze walls beside and behind the robot as an "imminent collision" and
     # freeze it permanently (the arena is only a few tenths of a metre wide).
     FORWARD_HALF_ANGLE = math.radians(35.0)   # front cone, centred on +x
-    REAR_HALF_ANGLE = math.radians(35.0)      # rear cone, checked before reversing
-    REAR_CLEAR_RANGE = 0.30                   # only reverse if the rear is clear
+    REAR_HALF_ANGLE = math.radians(35.0)      # rear cone, diagnostics only
 
-    # EMERGENCY escape: a short hard stop, then reverse (or spin in place when
-    # the rear is blocked) so a blocked robot can free itself. Repeats while the
-    # way ahead stays blocked.
-    EMERGENCY_STOP_TIME = 0.3        # seconds of zero velocity before escaping
-    EMERGENCY_ESCAPE_TIME = 1.7      # seconds of reverse/spin per cycle
-    EMERGENCY_REVERSE_SPEED = 0.10   # m/s
-    EMERGENCY_SPIN_SPEED = 0.60      # rad/s
+    # Collision gate: a hard stop, then hand control back to Nav2. Holding the
+    # emergency channel at 10 Hz would outrank twist_mux forever and trap the
+    # rover; re-driving it from here also fought the tree's own BackUp recovery,
+    # which looked like the rover rocking back and forth. So brake briefly, then
+    # release the topic (twist_mux falls back to Nav2 after its 0.5 s timeout).
+    EMERGENCY_STOP_TIME = 0.5        # s of zero velocity
+    EMERGENCY_RELEASE_TIME = 2.5     # s with the emergency topic silent
 
     # Stuck recovery: this node only bookkeeps. The tree's MissionStuck branch
     # owns the actual back-up/spin so two systems never fight over the wheels.
@@ -148,7 +150,7 @@ class AutonomousMissionNode(Node):
         self._goal_in_flight = False
         self._frontier_count = 0
         self._frontier_empties = 0
-        self._last_frontier_attempt = self.get_clock().now()
+        self._last_frontier_attempt = self.get_clock().now().nanoseconds * 1e-9
         self._frontier_blacklist = {}   # (ix, iy) -> expiry (sim seconds)
         self._current_frontier = None
 
@@ -195,11 +197,31 @@ class AutonomousMissionNode(Node):
         # ─── Emergency (collision stop/escape) sequencing ────
         self._emergency_start = self.get_clock().now()
 
+        # ─── Auto-start EXPLORE ──────────────────────────────
+        # In SLAM mode building the map is the first job, so the robot should
+        # not need a human to publish /dojo_mission before it starts moving.
+        # In AMCL mode the map is already complete, so EXPLORE stays off.
+        self.declare_parameter('auto_explore', True)
+        self.declare_parameter('auto_explore_delay', 5.0)
+        self.declare_parameter('localization_mode', 'amcl')
+        auto = self.get_parameter('auto_explore').value
+        if isinstance(auto, str):   # launch substitutions may arrive as text
+            auto = auto.strip().lower() in ('1', 'true', 'yes', 'on')
+        self._auto_explore_enabled = (
+            bool(auto)
+            and str(self.get_parameter('localization_mode').value).lower() == 'slam')
+        self._auto_explore_delay = float(
+            self.get_parameter('auto_explore_delay').value)
+        self._auto_explore_pending = self._auto_explore_enabled
+        self._auto_explore_from = None
+
         # ─── Timer: periodic state evaluation + status publish ──
         self._eval_timer = self.create_timer(0.1, self._evaluate_state)
         self._status_timer = self.create_timer(1.0, self._publish_status)
 
-        self.get_logger().info('Autonomous Mission Node started — state: IDLE')
+        self.get_logger().info(
+            'Autonomous Mission Node started — state: IDLE'
+            + (' (auto-EXPLORE armed)' if self._auto_explore_enabled else ''))
 
     # ─── Sensor callbacks ────────────────────────────────────
 
@@ -321,8 +343,48 @@ class AutonomousMissionNode(Node):
 
     # ─── Periodic evaluation (10 Hz) ─────────────────────────
 
+    def _maybe_auto_explore(self):
+        """Start EXPLORE by itself once the map, pose and clock are usable."""
+        if not self._auto_explore_pending:
+            return
+        # A human (or another node) already started something: hands off.
+        if self.sm.mission_type != MissionType.NONE:
+            self._auto_explore_pending = False
+            return
+
+        now = self.get_clock().now()
+        if now.nanoseconds == 0:        # sim clock not published yet
+            return
+        if self._auto_explore_from is None:
+            self._auto_explore_from = now
+            return
+        elapsed = (now - self._auto_explore_from).nanoseconds * 1e-9
+        if elapsed < self._auto_explore_delay:
+            return
+
+        # slam_toolbox publishes a 0x0 map until it has its first scan, and
+        # Nav2 rejects that, so wait for a map we can actually plan on.
+        if self._latest_map is None or self._latest_map.info.width == 0:
+            return
+        if self._latest_map.info.resolution <= 0.0:
+            return
+        if self._current_pose is None:  # no map->base transform yet
+            return
+
+        self._auto_explore_pending = False
+        self._frontier_empties = 0
+        self._goal_in_flight = False
+        self._current_frontier = None
+        self.get_logger().info(
+            f'Auto-start: EXPLORE after {elapsed:.1f}s '
+            f'(map {self._latest_map.info.width}x'
+            f'{self._latest_map.info.height})')
+        self.sm.start_mission(MissionType.EXPLORE)
+
     def _evaluate_state(self):
         """Main control loop. Evaluates collision/stuck and drives recovery timing."""
+
+        self._maybe_auto_explore()
 
         # ── Collision gate: highest priority ──
         # Entered when something appears in the cone the robot drives into, and
@@ -340,7 +402,10 @@ class AutonomousMissionNode(Node):
             if self._min_scan_range >= self.COLLISION_CLEAR_RANGE:
                 # Clear: return control to Nav2 (resumes the mission state).
                 self.sm.evaluate_collision_risk(self._min_scan_range)
-            else:
+            elif self.sm.mission_active:
+                # Only drive the wheels for an active mission. With no mission
+                # (IDLE, or a manual RViz 2D Goal Pose) Nav2's collision_monitor
+                # is the safety layer; publishing escapes here would fight it.
                 self._handle_emergency()
             return
 
@@ -366,29 +431,28 @@ class AutonomousMissionNode(Node):
 
     def _handle_emergency(self):
         """
-        Collision-stop escape (non-blocking, driven at 10 Hz).
+        Collision gate (non-blocking, driven at 10 Hz): brake, then release.
 
-        The gate is forward-looking, so holding zero velocity forever would trap
-        the robot against whatever it drove into. After a short hard stop the
-        robot reverses to open up the way ahead, falling back to spinning in
-        place when the rear is blocked too. The cycle repeats while blocked and
-        stops as soon as the front cone clears (it never reverses more than
-        EMERGENCY_ESCAPE_TIME at a time).
+        The gate is a *stop*, not a second driver. Braking for
+        EMERGENCY_STOP_TIME hard-stops the rover; after that the emergency topic
+        goes silent for EMERGENCY_RELEASE_TIME so twist_mux (0.5 s timeout) hands
+        control back to Nav2. The tree then sees IsCollisionImminent, withholds
+        the controller and runs its own BackUp/Spin recovery, and the collision
+        monitor still guards the raw scan. Driving the wheels from this node as
+        well made the two systems take turns reversing, i.e. rocking back and
+        forth, and holding the topic at 10 Hz trapped the rover for good.
         """
         now = self.get_clock().now()
         elapsed = (now - self._emergency_start).nanoseconds * 1e-9
-        cycle = self.EMERGENCY_STOP_TIME + self.EMERGENCY_ESCAPE_TIME
+        cycle = self.EMERGENCY_STOP_TIME + self.EMERGENCY_RELEASE_TIME
         if elapsed >= cycle:
             self._emergency_start = now
-            elapsed = 0.0
+            return
 
-        twist = Twist()
-        if elapsed >= self.EMERGENCY_STOP_TIME:
-            if self._min_scan_range_rear >= self.REAR_CLEAR_RANGE:
-                twist.linear.x = -self.EMERGENCY_REVERSE_SPEED
-            else:
-                twist.angular.z = self.EMERGENCY_SPIN_SPEED
-        self._cmd_vel_pub.publish(twist)
+        if elapsed < self.EMERGENCY_STOP_TIME:
+            self._cmd_vel_pub.publish(Twist())      # hard stop
+        # else: silent on purpose - let Nav2 recover. A stale command would be
+        # dropped by twist_mux after 0.5 s, so nothing needs to be published.
 
     def _handle_recovery(self):
         """

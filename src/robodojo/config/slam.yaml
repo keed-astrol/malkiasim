@@ -31,9 +31,8 @@ slam_toolbox:
     minimum_time_interval: 0.2     # process at most 5 scans/s (lidar is 15 Hz)
     # slam_toolbox subscribes through a tf2 MessageFilter that queues scans until
     # the odom -> lidar_link transform for their stamp exists. The defaults
-    # (scan_queue_size 1, transform_timeout 0.2) dropped the scan in a burst
-    # ("discarding message because the queue is full"), so the mapper never
-    # received a scan: it published a 0x0 map, which Nav2 rejects as malformed.
+    # (scan_queue_size 1, transform_timeout 0.2) are too tight when the EKF is
+    # still catching up with a 15 Hz scan stream, so give the filter some slack.
     scan_queue_size: 5
     transform_timeout: 0.5
     tf_buffer_duration: 30.0
@@ -42,7 +41,13 @@ slam_toolbox:
     # Scan matching
     use_scan_matching: true
     use_scan_barycenter: true
-    minimum_travel_distance: 0.1
+    # A parked rover must still build a map. shouldProcessScan() only adds a
+    # scan after the robot has travelled 0.8 * minimum_travel_distance; the
+    # single "first measurement" pass does not reach the published grid (a
+    # parked rover's /map stays 0x0 even after a minute of scans). An empty
+    # /map is rejected by Nav2 as malformed and leaves EXPLORE with no
+    # frontiers, so accept scans on the time interval instead of on travel.
+    minimum_travel_distance: 0.0
     minimum_travel_heading: 0.1
     scan_buffer_size: 1000
     scan_buffer_maximum_scan_distance: 10.0

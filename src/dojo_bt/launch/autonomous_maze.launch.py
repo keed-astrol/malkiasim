@@ -22,6 +22,7 @@ from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
 from launch_ros.descriptions import ParameterFile
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def _default_map() -> Path:
@@ -266,7 +267,14 @@ def generate_launch_description():
         executable='autonomous_mission_node',
         name='autonomous_mission_node',
         output='screen',
-        parameters=[bt_cfg, {'use_sim_time': True}],
+        parameters=[
+            bt_cfg,
+            {'use_sim_time': True},
+            # slam mode: start EXPLORE on its own (no /dojo_mission needed).
+            {'localization_mode': LaunchConfiguration('localization')},
+            {'auto_explore': ParameterValue(
+                LaunchConfiguration('auto_explore'), value_type=bool)},
+        ],
     )
 
     # ─── RViz with nav config ───────────────────────────────────
@@ -293,6 +301,14 @@ def generate_launch_description():
             description='amcl: map_server + AMCL against the map argument. '
                         'slam: slam_toolbox builds the map live (no map needed, '
                         'use this for EXPLORE on an unknown arena).',
+        ),
+        DeclareLaunchArgument(
+            'auto_explore',
+            default_value='true',
+            choices=['true', 'false'],
+            description='Start an EXPLORE mission by itself once the map is '
+                        'usable. Only takes effect with localization:=slam; '
+                        'set false to drive to goals by hand (RViz 2D Goal Pose).',
         ),
         SetEnvironmentVariable(
             name='GZ_SIM_RESOURCE_PATH',

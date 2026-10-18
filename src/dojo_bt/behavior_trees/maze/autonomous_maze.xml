@@ -7,7 +7,7 @@
     Loaded by nav2_bt_navigator as the default NavigateToPose tree. It drives
     Nav2's planning + control pipeline and layers RoboDojo safety on top:
 
-      ComputePathToPose  ->  FollowPath (with replanning at 1 Hz)
+      ComputePathToPose  ->  FollowPath (with replanning at 0.5 Hz)
         * Collision gate: while the mission node reports something inside the
           collision radius of the direction of travel, the controller is not
           commanded and the step fails so recovery runs. The mission node owns
@@ -34,8 +34,10 @@
     <RecoveryNode number_of_retries="6" name="NavigateToPoseRecovery">
       <PipelineSequence name="NavigateWithReplanning">
 
-        <!-- Replan the global path at 1 Hz while following it. -->
-        <RateController hz="1.0">
+        <!-- Replan at 0.5 Hz while following. Faster replanning made the path
+             flip between near-equal options in the tight divisions before the
+             controller could commit, which read as the rover dithering. -->
+        <RateController hz="0.5">
           <RecoveryNode number_of_retries="1" name="ComputePathToPose">
             <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased"/>
             <ClearEntireCostmap name="ClearGlobalCostmap-Context"
