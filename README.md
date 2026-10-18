@@ -488,6 +488,24 @@ ros2 node list            # must be empty
 
 Then `colcon build --symlink-install` and relaunch.
 
+**Editing `autonomous_mission_node.py` needs a rebuild.** The launch runs
+`install/dojo_bt/lib/dojo_bt/autonomous_mission_node`, which `colcon` installs as
+a **copy** of the module (not a symlink, even with `--symlink-install`). Unlike
+the launch/config/URDF files, edits to that Python file do **not** take effect
+until you rebuild:
+
+```bash
+colcon build --symlink-install --packages-select dojo_bt
+```
+
+The node prints a build marker at startup so you can tell what is running:
+
+```
+Autonomous Mission Node started — state: IDLE (auto-EXPLORE armed) [wedge 4s/1.0s rear>=0.30m]
+```
+
+If that suffix is missing, you are running an older copy.
+
 **`model://gamefield_arena` not found** — rebuild so the model files are
 installed, and make sure `GZ_SIM_RESOURCE_PATH` includes the gamefield models
 directory. The launch files set this automatically; for a manual `gz sim`:

@@ -318,6 +318,11 @@ behavior_server:
     global_footprint_topic: global_costmap/published_footprint
     cycle_frequency: 10.0
     enable_stamped_cmd_vel: false
+    # Route BackUp/Spin through the controller chain instead of straight to
+    # /cmd_vel (the default), so the velocity smoother and the collision
+    # monitor still arbitrate them. Otherwise a recovery BackUp drives blind
+    # and can reverse into a wall.
+    cmd_vel_topic: cmd_vel_nav
     behavior_plugins: ["spin", "backup", "drive_on_heading", "wait"]
     # FIX: '::' instead of '/'
     spin:

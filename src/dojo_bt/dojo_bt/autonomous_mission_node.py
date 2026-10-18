@@ -104,10 +104,13 @@ class AutonomousMissionNode(Node):
     WEDGE_MIN_TURN = 0.2         # rad/s of Nav2 intent that counts
     WEDGE_MIN_MOTION = 0.02      # m/s measured = the rover really is moving
     WEDGE_MIN_TURN_MOTION = 0.1  # rad/s measured
-    WEDGE_REVERSE_SPEED = 0.12   # m/s
-    WEDGE_REVERSE_TIME = 1.4     # s
+    # The emergency channel outranks the collision monitor, so this reverse is
+    # the one motion nothing else guards. Keep it short, slow and rear-checked.
+    WEDGE_REVERSE_SPEED = 0.06   # m/s
+    WEDGE_REVERSE_TIME = 1.0     # s  (<= 0.06 m of travel)
     WEDGE_COOLDOWN = 3.0         # s between escapes
-    WEDGE_MIN_REAR = 0.15        # m: only reverse if the rear is this clear
+    WEDGE_MIN_REAR = 0.30        # m: rear clearance needed to START reversing
+    WEDGE_ABORT_REAR = 0.22      # m: abort the reverse if the rear gets closer
 
     # Stuck recovery: this node only bookkeeps. The tree's MissionStuck branch
     # owns the actual back-up/spin so two systems never fight over the wheels.
@@ -245,7 +248,9 @@ class AutonomousMissionNode(Node):
 
         self.get_logger().info(
             'Autonomous Mission Node started — state: IDLE'
-            + (' (auto-EXPLORE armed)' if self._auto_explore_enabled else ''))
+            + (' (auto-EXPLORE armed)' if self._auto_explore_enabled else '')
+            + f' [wedge {self.WEDGE_TIMEOUT:.0f}s/{self.WEDGE_REVERSE_TIME:.1f}s '
+            f'rear>={self.WEDGE_MIN_REAR:.2f}m]')
 
     # ─── Sensor callbacks ────────────────────────────────────
 
@@ -455,9 +460,18 @@ class AutonomousMissionNode(Node):
         """
         now = self.get_clock().now()
 
-        # Finish an escape that is already running.
+        # Finish an escape that is already running. Re-check the rear every
+        # cycle: this command bypasses the collision monitor, so nothing else
+        # can stop the rover backing into a wall.
         if self._wedge_until_ns:
             if now.nanoseconds < self._wedge_until_ns:
+                if self._min_scan_range_rear < self.WEDGE_ABORT_REAR:
+                    self.get_logger().warn(
+                        'Wedge escape aborted: rear at '
+                        f'{self._min_scan_range_rear:.2f} m')
+                    self._wedge_until_ns = 0
+                    self._cmd_vel_pub.publish(Twist())
+                    return True
                 twist = Twist()
                 twist.linear.x = -self.WEDGE_REVERSE_SPEED
                 self._cmd_vel_pub.publish(twist)
@@ -510,7 +524,9 @@ class AutonomousMissionNode(Node):
         self._wedge_ref = None
         self._wedge_until_ns = now.nanoseconds + int(self.WEDGE_REVERSE_TIME * 1e9)
         self.get_logger().warn(
-            f'Wedge: commanded but no motion for {stuck_for:.1f}s - reversing '
+            f'Wedge: commanded but no motion for {stuck_for:.1f}s '
+            f'(front {self._min_scan_range:.2f} m, rear '
+            f'{self._min_scan_range_rear:.2f} m) - reversing '
             f'{self.WEDGE_REVERSE_TIME:.1f}s and dropping this goal')
         twist = Twist()
         twist.linear.x = -self.WEDGE_REVERSE_SPEED
