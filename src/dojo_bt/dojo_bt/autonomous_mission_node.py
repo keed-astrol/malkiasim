@@ -845,6 +845,10 @@ class AutonomousMissionNode(Node):
 
         goal = NavigateToPose.Goal()
         goal.pose = pose
+        # Fresh stamp: Nav2 transforms the goal with its own header stamp, and a
+        # stale one fails against the TF buffer ("Lookup would require
+        # extrapolation into the past").
+        goal.pose.header.stamp = self.get_clock().now().to_msg()
         goal.behavior_tree = ''
 
         self.get_logger().info(
