@@ -8,11 +8,9 @@
     Nav2's planning + control pipeline and layers RoboDojo safety on top:
 
       ComputePathToPose  ->  FollowPath (with replanning at 0.5 Hz)
-        * Collision gate: while the mission node reports something inside the
-          collision radius of the direction of travel, the controller is not
-          commanded and the step fails so recovery runs. The mission node owns
-          /cmd_vel_emergency (hard stop + escape manoeuvre), so nothing in this
-          tree publishes competing zeros on that topic.
+        * Safety: the collision_monitor stops the wheels for the real swept
+          footprint. The tree only reacts when a step fails; the mission node
+          keeps a short reverse escape for a wedged rover.
       Recovery (runs only when a goal step fails)
         * stuck  (mission node "is_stuck")  -> back up + spin
         * collision imminent                -> back up + wait
@@ -45,16 +43,15 @@
           </RecoveryNode>
         </RateController>
 
-        <!-- Follow the path, guarded by the collision gate. -->
+        <!-- Follow the path. Deliberately NOT gated on IsCollisionImminent:
+             withholding every controller command while anything was within
+             0.25 m of the front cone also blocked rotation in place, so in a
+             tight arena the rover could not even start turning. The
+             collision_monitor enforces the real (swept) footprint, and the
+             recovery branch below still uses IsCollisionImminent to decide to
+             reverse out. -->
         <RecoveryNode number_of_retries="1" name="CollisionSafeFollowPath">
           <Sequence name="GuardedFollowPath">
-            <!-- Only hand control to the controller when the way ahead is clear.
-                 Fails the step otherwise, which triggers recovery. The mission
-                 node is the single publisher of /cmd_vel_emergency, so the tree
-                 deliberately does not emit its own zero velocity here. -->
-            <Inverter name="ProceedOnlyWhenClear">
-              <IsCollisionImminent/>
-            </Inverter>
             <FollowPath path="{path}"
                         controller_id="FollowPath"
                         goal_checker_id="general_goal_checker"/>

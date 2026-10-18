@@ -100,8 +100,8 @@ controller_server:
       plugin: "nav2_controller::SimpleProgressChecker"
       # Tight squeezes and ramp climbing are slow; 0.3 m in 10 s aborted the
       # goal mid-manoeuvre and dropped the robot into a recovery/spin loop.
-      required_movement_radius: 0.1
-      movement_time_allowance: 20.0
+      required_movement_radius: 0.08
+      movement_time_allowance: 10.0
 
     general_goal_checker:
       stateful: true
@@ -118,21 +118,21 @@ controller_server:
       # so there is no room for overshoot. 0.26 m/s made the rover arrive at
       # gaps too hot, clip them and get wedged (gz then ejects it, which looks
       # like a teleport). Turning stays fast - that is what shrinks the radius.
-      max_vel_x: 0.20
+      max_vel_x: 0.15
       max_vel_y: 0.0
       # Diff drive: a higher angular limit is what shrinks the turning radius
       # (radius = v/omega). At 0.26 m/s and 1.0 rad/s the robot needed 0.26 m
       # of space to turn, which does not fit a 0.5 m maze corner.
-      max_vel_theta: 2.0
+      max_vel_theta: 1.2
       min_speed_xy: 0.0
-      max_speed_xy: 0.20
+      max_speed_xy: 0.15
       min_speed_theta: 0.0
-      acc_lim_x: 1.0
+      acc_lim_x: 0.35
       acc_lim_y: 0.0
-      acc_lim_theta: 4.0
-      decel_lim_x: -1.0
+      acc_lim_theta: 1.5
+      decel_lim_x: -0.35
       decel_lim_y: 0.0
-      decel_lim_theta: -4.0
+      decel_lim_theta: -1.5
       vx_samples: 20
       vy_samples: 1
       vtheta_samples: 30
@@ -178,19 +178,19 @@ local_costmap:
       # 2.5 cm cells: a ~0.22 m free channel in a 0.5 m corridor is only ~4
       # cells wide at 5 cm, which is too coarse to turn inside.
       resolution: 0.025
-      # Planner footprint - deliberately smaller than the metal.
-      # True footprint from the meshes is base_link 0.271 x 0.236 m with the
-      # wheels out to y = +/-0.141, i.e. an inscribed radius of 0.136 m. The
-      # arena's corridors are a median 0.42 m wide (25th percentile 0.22 m), so
-      # the keep-out band eats the whole navigable channel: at 0.136 m the
-      # channel for the robot centre in a median corridor is only 0.15 m, and
-      # 36% of the free floor is unreachable by construction.
-      # Shrinking to a 0.115 m inscribed radius buys ~4.2 cm of channel per
-      # corridor. Cost: the planner will accept trajectories where the wheels
-      # overlap a wall by up to 0.026 m, so expect some scraping in tight spots.
-      # The collision_monitor keeps the true (padded) footprint below, so the
-      # emergency stop is still honest.
-      footprint: "[ [0.125, 0.115], [0.125, -0.115], [-0.125, -0.115], [-0.125, 0.115] ]"
+      # Planner footprint = the measured metal, not a shrunken one.
+      # True footprint from the meshes is a 0.271 x 0.236 m body with the wheels
+      # out to y = +/-0.141, i.e. an inscribed radius of 0.136 m.
+      #
+      # An earlier revision planned with 0.115 m to buy channel in the narrow
+      # corridors. Measured on the running stack, that is worse: the planner
+      # happily produced paths through pinches the rover physically cannot pass,
+      # the controller drove in until the collision monitor stopped it, and with
+      # the way ahead fully lethal it could neither pivot nor back out - it sat
+      # there with cmd_vel_nav at 0.116 m/s. A plan the rover cannot execute is
+      # not a plan, so the footprint is now the real one (it may still scrape by
+      # a wheel's width in a 0.30 m gap, but it no longer plans a 0.24 m one).
+      footprint: "[ [0.128, 0.134], [0.128, -0.134], [-0.128, -0.134], [-0.128, 0.134] ]"
       transform_tolerance: 0.5
       # FIX: ObstacleLayer instead of VoxelLayer, since this is a 2D lidar
       plugins: ["obstacle_layer", "inflation_layer"]
@@ -236,10 +236,18 @@ global_costmap:
       robot_base_frame: base_footprint
       update_frequency: 1.0
       publish_frequency: 1.0
-      rolling_window: false
+      # Rolling window, 8 x 8 m. With a non-rolling costmap the static layer
+      # sizes it to the *last* /map it received; in SLAM mode every frontier
+      # goal sits on the edge of the new map, i.e. one cell outside the costmap,
+      # and the planner rejected it instantly ("worldToMap failed: mx 25, size
+      # 25") so the goal aborted 13 ms after being sent. A window larger than
+      # the 6 x 3 m arena keeps every reachable goal inside it.
+      rolling_window: true
+      width: 8
+      height: 8
       resolution: 0.05
-      # Planner footprint - deliberately smaller than the metal; see local_costmap.
-      footprint: "[ [0.125, 0.115], [0.125, -0.115], [-0.125, -0.115], [-0.125, 0.115] ]"
+      # Planner footprint - the measured metal; see local_costmap above.
+      footprint: "[ [0.128, 0.134], [0.128, -0.134], [-0.128, -0.134], [-0.128, 0.134] ]"
       transform_tolerance: 0.5
       track_unknown_space: true
       plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
@@ -325,9 +333,9 @@ behavior_server:
     robot_base_frame: base_footprint
     transform_tolerance: 0.2
     simulate_ahead_time: 2.0
-    max_rotational_vel: 2.0
-    min_rotational_vel: 0.4
-    rotational_acc_lim: 4.0
+    max_rotational_vel: 1.2
+    min_rotational_vel: 0.25
+    rotational_acc_lim: 1.5
 
 # FIX: the key names were wrong (acceleration/deceleration). Nav2 uses max_accel/max_decel.
 velocity_smoother:
@@ -336,10 +344,10 @@ velocity_smoother:
     smoothing_frequency: 20.0
     scale_velocities: false
     feedback: "OPEN_LOOP"
-    max_velocity: [0.26, 0.0, 2.0]
-    min_velocity: [-0.26, 0.0, -2.0]
-    max_accel: [1.0, 0.0, 4.0]
-    max_decel: [-1.0, 0.0, -4.0]
+    max_velocity: [0.15, 0.0, 1.2]
+    min_velocity: [-0.15, 0.0, -1.2]
+    max_accel: [0.35, 0.0, 1.5]
+    max_decel: [-0.35, 0.0, -1.5]
     odom_topic: "odom"
     odom_duration: 0.1
     deadband_velocity: [0.0, 0.0, 0.0]

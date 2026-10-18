@@ -81,6 +81,7 @@ class AutonomousMissionNode(Node):
     FRONTIER_MIN_GOAL_DIST = 0.40    # m: don't chase something under the robot
     FRONTIER_MAX_GOAL_DIST = 15.0    # m: sanity cap
     FRONTIER_CLEARANCE = 0.20        # m: free space required around the goal cell
+    FRONTIER_GOAL_INSET = 0.15       # m: pull the goal back from the unknown edge
     FRONTIER_BLACKLIST_TIME = 90.0   # s: forget a failed frontier after this
     FRONTIER_RETRY_PERIOD = 1.0      # s: minimum gap between frontier selections
     FRONTIER_EMPTY_ATTEMPTS = 3      # consecutive empty scans before giving up
@@ -92,13 +93,21 @@ class AutonomousMissionNode(Node):
     FORWARD_HALF_ANGLE = math.radians(35.0)   # front cone, centred on +x
     REAR_HALF_ANGLE = math.radians(35.0)      # rear cone, diagnostics only
 
-    # Collision gate: a hard stop, then hand control back to Nav2. Holding the
-    # emergency channel at 10 Hz would outrank twist_mux forever and trap the
-    # rover; re-driving it from here also fought the tree's own BackUp recovery,
-    # which looked like the rover rocking back and forth. So brake briefly, then
-    # release the topic (twist_mux falls back to Nav2 after its 0.5 s timeout).
-    EMERGENCY_STOP_TIME = 0.5        # s of zero velocity
-    EMERGENCY_RELEASE_TIME = 2.5     # s with the emergency topic silent
+    # Wedge escape. Nav2 can command motion that the collision_monitor then
+    # vetoes outright (walls inside the padded footprint on both sides). The
+    # rover then sits still, "Failed to make progress" repeats every
+    # movement_time_allowance, and the goal never finishes - the rover is stuck
+    # for good. A short reverse on /cmd_vel_emergency bypasses the monitor
+    # (twist_mux priority 100) and drops the goal so EXPLORE picks another one.
+    WEDGE_TIMEOUT = 4.0          # s of "commanded but not moving"
+    WEDGE_MIN_COMMAND = 0.02     # m/s of Nav2 intent that counts as commanded
+    WEDGE_MIN_TURN = 0.2         # rad/s of Nav2 intent that counts
+    WEDGE_MIN_MOTION = 0.02      # m/s measured = the rover really is moving
+    WEDGE_MIN_TURN_MOTION = 0.1  # rad/s measured
+    WEDGE_REVERSE_SPEED = 0.12   # m/s
+    WEDGE_REVERSE_TIME = 1.4     # s
+    WEDGE_COOLDOWN = 3.0         # s between escapes
+    WEDGE_MIN_REAR = 0.15        # m: only reverse if the rear is this clear
 
     # Stuck recovery: this node only bookkeeps. The tree's MissionStuck branch
     # owns the actual back-up/spin so two systems never fight over the wheels.
@@ -148,13 +157,21 @@ class AutonomousMissionNode(Node):
         # ─── Frontier exploration state ──────────────────────
         self._latest_map: Optional[OccupancyGrid] = None
         self._goal_in_flight = False
+        self._goal_handle = None
+        self._nav_goal_id = None
         self._frontier_count = 0
+        self._last_frontier_wait_log = 0.0
         self._frontier_empties = 0
         self._last_frontier_attempt = self.get_clock().now().nanoseconds * 1e-9
         self._frontier_blacklist = {}   # (ix, iy) -> expiry (sim seconds)
         self._current_frontier = None
 
         # ─── Subscribers (command input) ─────────────────────
+        # Controller output, to notice "Nav2 wants to move but nothing happens".
+        self._intent_sub = self.create_subscription(
+            Twist, '/cmd_vel_nav', self._on_nav_intent, 10,
+            callback_group=self._sensor_cb)
+
         self._cmd_sub = self.create_subscription(
             String, '/dojo_mission',
             self._on_mission_command, 10,
@@ -194,8 +211,15 @@ class AutonomousMissionNode(Node):
         self._recovery_phase = -1   # -1 = not active
         self._recovery_sent = False
 
-        # ─── Emergency (collision stop/escape) sequencing ────
-        self._emergency_start = self.get_clock().now()
+        # ─── Wedge escape sequencing ─────────────────────────
+        self._nav_intent: Optional[Twist] = None
+        self._nav_intent_time = 0.0
+        self._wedge_since = None
+        self._wedge_ref = None
+        self._wedge_until_ns = 0
+        self._last_wedge = self.get_clock().now()
+        self._latest_speed = 0.0
+        self._latest_turn = 0.0
 
         # ─── Auto-start EXPLORE ──────────────────────────────
         # In SLAM mode building the map is the first job, so the robot should
@@ -277,7 +301,13 @@ class AutonomousMissionNode(Node):
         self._update_current_pose(msg.pose.pose, msg.header)
 
     def _on_filtered_odom(self, msg: Odometry):
+        self._latest_speed = msg.twist.twist.linear.x
+        self._latest_turn = msg.twist.twist.angular.z
         self._update_current_pose(msg.pose.pose, msg.header)
+
+    def _on_nav_intent(self, msg: Twist):
+        self._nav_intent = msg
+        self._nav_intent_time = self.get_clock().now().nanoseconds * 1e-9
 
     def _on_imu(self, msg: Imu):
         self._latest_imu = msg
@@ -370,6 +400,8 @@ class AutonomousMissionNode(Node):
             return
         if self._current_pose is None:  # no map->base transform yet
             return
+        if not self._nav_client.server_is_ready():   # bt_navigator not up yet
+            return
 
         self._auto_explore_pending = False
         self._frontier_empties = 0
@@ -386,31 +418,18 @@ class AutonomousMissionNode(Node):
 
         self._maybe_auto_explore()
 
-        # ── Collision gate: highest priority ──
-        # Entered when something appears in the cone the robot drives into, and
-        # left again once the way ahead is clear (with hysteresis so the robot
-        # does not flap on the threshold). The mission node owns
-        # /cmd_vel_emergency while a mission runs, so these commands always
-        # outrank Nav2's on twist_mux.
-        collision_risk = self._min_scan_range < self.COLLISION_MIN_RANGE
-        in_emergency = self.sm.state == MissionState.EMERGENCY
-        if collision_risk or in_emergency:
-            if not in_emergency:
-                self.sm.evaluate_collision_risk(self._min_scan_range)
-                self._emergency_start = self.get_clock().now()
-            self._recovery_phase = -1
-            if self._min_scan_range >= self.COLLISION_CLEAR_RANGE:
-                # Clear: return control to Nav2 (resumes the mission state).
-                self.sm.evaluate_collision_risk(self._min_scan_range)
-            elif self.sm.mission_active:
-                # Only drive the wheels for an active mission. With no mission
-                # (IDLE, or a manual RViz 2D Goal Pose) Nav2's collision_monitor
-                # is the safety layer; publishing escapes here would fight it.
-                self._handle_emergency()
-            return
+        # ── Collision bookkeeping (diagnostics only) ──
+        # The collision_monitor is the single layer that touches the wheels.
+        # This node used to publish competing stops/escapes at priority 100,
+        # which flapped against Nav2's own recovery. It now only reports the
+        # distance (the BT reads min_scan_range for its IsCollisionImminent
+        # recovery selector) and unwedges a pinned rover.
+        self.sm.ctx.collision_risk = (
+            self._min_scan_range < self.COLLISION_MIN_RANGE)
 
-        # ── Check collision warning (not stopped yet) ──
-        self.sm.evaluate_collision_risk(self._min_scan_range)
+        # ── Wedge escape: commanded, but nothing is moving ──
+        if self._maybe_unstick():
+            return
 
         # ── Stuck detection ──
         if self.sm.mission_active and self._current_pose is not None:
@@ -429,30 +448,91 @@ class AutonomousMissionNode(Node):
         else:
             self._recovery_phase = -1  # reset when not recovering
 
-    def _handle_emergency(self):
-        """
-        Collision gate (non-blocking, driven at 10 Hz): brake, then release.
+    def _maybe_unstick(self) -> bool:
+        """Reverse out of a pinch when Nav2 commands motion but nothing moves.
 
-        The gate is a *stop*, not a second driver. Braking for
-        EMERGENCY_STOP_TIME hard-stops the rover; after that the emergency topic
-        goes silent for EMERGENCY_RELEASE_TIME so twist_mux (0.5 s timeout) hands
-        control back to Nav2. The tree then sees IsCollisionImminent, withholds
-        the controller and runs its own BackUp/Spin recovery, and the collision
-        monitor still guards the raw scan. Driving the wheels from this node as
-        well made the two systems take turns reversing, i.e. rocking back and
-        forth, and holding the topic at 10 Hz trapped the rover for good.
+        Returns True while this node owns the wheels for the cycle.
         """
         now = self.get_clock().now()
-        elapsed = (now - self._emergency_start).nanoseconds * 1e-9
-        cycle = self.EMERGENCY_STOP_TIME + self.EMERGENCY_RELEASE_TIME
-        if elapsed >= cycle:
-            self._emergency_start = now
-            return
 
-        if elapsed < self.EMERGENCY_STOP_TIME:
-            self._cmd_vel_pub.publish(Twist())      # hard stop
-        # else: silent on purpose - let Nav2 recover. A stale command would be
-        # dropped by twist_mux after 0.5 s, so nothing needs to be published.
+        # Finish an escape that is already running.
+        if self._wedge_until_ns:
+            if now.nanoseconds < self._wedge_until_ns:
+                twist = Twist()
+                twist.linear.x = -self.WEDGE_REVERSE_SPEED
+                self._cmd_vel_pub.publish(twist)
+                return True
+            self._wedge_until_ns = 0
+
+        if not self.sm.mission_active:
+            self._wedge_since = None
+            self._wedge_ref = None
+            return False
+
+        intent = self._nav_intent
+        fresh = (now.nanoseconds * 1e-9 - self._nav_intent_time) < 1.0
+        commanded = (fresh and intent is not None
+                     and (abs(intent.linear.x) >= self.WEDGE_MIN_COMMAND
+                          or abs(intent.angular.z) >= self.WEDGE_MIN_TURN))
+        pose = self._current_pose
+        if not commanded or pose is None:
+            self._wedge_since = None
+            self._wedge_ref = None
+            return False
+
+        x = pose.pose.position.x
+        y = pose.pose.position.y
+        ref = self._wedge_ref
+        if ref is None:
+            self._wedge_since = now
+            self._wedge_ref = (x, y, self._current_yaw)
+            return False
+        moved = math.hypot(x - ref[0], y - ref[1])
+        dyaw = abs(math.atan2(math.sin(self._current_yaw - ref[2]),
+                              math.cos(self._current_yaw - ref[2])))
+        if (moved >= self.WEDGE_MIN_MOTION or dyaw >= self.WEDGE_MIN_TURN_MOTION
+                or abs(self._latest_speed) >= self.WEDGE_MIN_MOTION
+                or abs(self._latest_turn) >= self.WEDGE_MIN_TURN_MOTION):
+            self._wedge_since = now
+            self._wedge_ref = (x, y, self._current_yaw)
+            return False
+
+        stuck_for = (now - self._wedge_since).nanoseconds * 1e-9
+        if stuck_for < self.WEDGE_TIMEOUT:
+            return False
+        if (now - self._last_wedge).nanoseconds * 1e-9 < self.WEDGE_COOLDOWN:
+            return False
+        if self._min_scan_range_rear < self.WEDGE_MIN_REAR:
+            return False          # no room to reverse; let the tree try a spin
+
+        self._last_wedge = now
+        self._wedge_since = None
+        self._wedge_ref = None
+        self._wedge_until_ns = now.nanoseconds + int(self.WEDGE_REVERSE_TIME * 1e9)
+        self.get_logger().warn(
+            f'Wedge: commanded but no motion for {stuck_for:.1f}s - reversing '
+            f'{self.WEDGE_REVERSE_TIME:.1f}s and dropping this goal')
+        twist = Twist()
+        twist.linear.x = -self.WEDGE_REVERSE_SPEED
+        self._cmd_vel_pub.publish(twist)
+
+        # Drop the goal (blacklist the frontier, pick another) and make sure the
+        # abandoned goal's result cannot be mistaken for the next one.
+        self._drop_nav_goal()
+        self._on_goal_failed('wedge')
+        return True
+
+    def _drop_nav_goal(self):
+        """Stop caring about the in-flight nav goal and cancel it in Nav2."""
+        self._goal_in_flight = False
+        self._nav_goal_id = None
+        handle = self._goal_handle
+        self._goal_handle = None
+        if handle is not None:
+            try:
+                handle.cancel_goal_async()
+            except Exception as e:      # pragma: no cover - defensive
+                self.get_logger().warn(f'Could not cancel nav goal: {e}')
 
     def _handle_recovery(self):
         """
@@ -629,6 +709,27 @@ class AutonomousMissionNode(Node):
 
             wx = ox + (cand % w + 0.5) * res
             wy = oy + (cand // w + 0.5) * res
+
+            # A frontier cell is by definition on the boundary of known space,
+            # which is also the boundary of the map array. Walk the goal back
+            # into known-free space so it is comfortably inside the costmap and
+            # the planner is never handed an edge cell.
+            if robot is not None:
+                vx = robot.pose.position.x - wx
+                vy = robot.pose.position.y - wy
+                norm = math.hypot(vx, vy)
+                if norm > 1e-6:
+                    vx, vy = vx / norm, vy / norm
+                    for _ in range(int(self.FRONTIER_GOAL_INSET / res)):
+                        tx, ty = wx + vx * res, wy + vy * res
+                        ix = int((tx - ox) / res)
+                        iy = int((ty - oy) / res)
+                        if not (0 <= ix < w and 0 <= iy < h):
+                            break
+                        if data[iy * w + ix] != 0:   # not known-free: stop
+                            break
+                        wx, wy = tx, ty
+
             key = self._frontier_key(grid, cand % w, cand // w)
             expiry = self._frontier_blacklist.get(key)
             if expiry is not None and expiry > now:
@@ -680,6 +781,19 @@ class AutonomousMissionNode(Node):
 
         goal = self._pick_frontier()
         if goal is None:
+            if self._frontier_count > 0:
+                # Frontiers exist in the map but none is usable right now (all
+                # blacklisted, too close, or no clearance). Waiting for the
+                # blacklist to expire is correct; declaring the map "fully
+                # explored" here ended the mission on a 1.2 x 3 m map.
+                self._frontier_empties = 0
+                now = self.get_clock().now().nanoseconds * 1e-9
+                if now - self._last_frontier_wait_log >= 10.0:
+                    self._last_frontier_wait_log = now
+                    self.get_logger().info(
+                        f'EXPLORE: {self._frontier_count} frontier(s) known but '
+                        'none usable yet; waiting for the blacklist to expire')
+                return
             self._frontier_empties += 1
             self.get_logger().info(
                 f'EXPLORE: no frontier found ({self._frontier_empties}/'
@@ -756,10 +870,22 @@ class AutonomousMissionNode(Node):
             self._on_goal_failed('rejected')
             return
 
-        handle.get_result_async().add_done_callback(self._on_nav_result)
+        self._goal_handle = handle
+        self._nav_goal_id = bytes(handle.goal_id.uuid)
+        handle.get_result_async().add_done_callback(
+            lambda fut, gid=self._nav_goal_id: self._on_nav_result(fut, gid))
 
-    def _on_nav_result(self, future):
-        """Fires when the accepted goal actually finishes."""
+    def _on_nav_result(self, future, goal_id=None):
+        """Fires when the accepted goal actually finishes.
+
+        A goal that was preempted (or dropped because the rover was wedged)
+        still delivers its result later. Without the goal id check that stale
+        ABORTED was blamed on the *new* goal, so every frontier was blacklisted
+        and EXPLORE declared the map "fully explored" while it was still tiny.
+        """
+        if goal_id is not None and goal_id != self._nav_goal_id:
+            self.get_logger().debug('Ignoring result of a superseded goal')
+            return
         try:
             status = future.result().status
         except Exception as e:
@@ -768,6 +894,7 @@ class AutonomousMissionNode(Node):
             return
 
         self._goal_in_flight = False
+        self._goal_handle = None
         if status == GoalStatus.STATUS_SUCCEEDED:
             self.get_logger().info('Navigation goal reached')
             if self.sm.mission_type == MissionType.EXPLORE:
@@ -781,6 +908,8 @@ class AutonomousMissionNode(Node):
 
     def _on_goal_failed(self, reason: str):
         """A goal did not complete: keep exploring, or end the mission."""
+        self._goal_handle = None
+        self._nav_goal_id = None
         if self.sm.mission_type == MissionType.EXPLORE and self.sm.mission_active:
             self.get_logger().warn(f'EXPLORE: frontier unreachable ({reason}); trying another')
             self._blacklist_frontier()
