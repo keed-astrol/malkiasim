@@ -70,4 +70,11 @@ install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})
 # --- Python package ---
 install(DIRECTORY ${PROJECT_NAME} DESTINATION share/${PROJECT_NAME})
 
+# --- Mission node executable (launched as 'autonomous_mission_node') ---
+install(PROGRAMS
+  ${PROJECT_NAME}/autonomous_mission_node.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME autonomous_mission_node
+)
+
 ament_package()

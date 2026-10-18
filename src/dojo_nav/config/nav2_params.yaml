@@ -230,8 +230,10 @@ global_costmap:
 map_server:
   ros__parameters:
     use_sim_time: true
-    # FIX: was empty, so no map loaded
-    yaml_filename: "/home/keedastro/dojourdf/maps/arena.yaml"
+    # The map is supplied at launch time by the 'map' launch argument
+    # (navigate.launch.py / autonomous_maze.launch.py default to
+    # maps/arena.yaml in this repository), which overrides yaml_filename.
+    # Do not hard-code a user-specific absolute path here.
 
 planner_server:
   ros__parameters:
@@ -301,14 +303,16 @@ velocity_smoother:
     enable_stamped_cmd_vel: false
 
 # Chain: controller -> cmd_vel_nav -> velocity_smoother -> cmd_vel_smoothed
-#        -> collision_monitor -> cmd_vel -> Gazebo diff drive
+#        -> collision_monitor -> cmd_vel_safe
+#        -> twist_mux (+ /cmd_vel_emergency, high priority) -> cmd_vel
+#        -> Gazebo diff drive
 collision_monitor:
   ros__parameters:
     use_sim_time: true
     base_frame_id: "base_footprint"
     odom_frame_id: "odom"
     cmd_vel_in_topic: "cmd_vel_smoothed"
-    cmd_vel_out_topic: "cmd_vel"
+    cmd_vel_out_topic: "cmd_vel_safe"
     state_topic: "collision_monitor_state"
     enable_stamped_cmd_vel: false
     transform_tolerance: 0.5
@@ -389,15 +393,3 @@ docking_server:
       projection_time: 5.0
       simulation_step: 0.1
       dock_collision_threshold: 0.3
-
-# Not used for maze navigation, but navigation_launch.py always starts this node.
-# graph_filepath must point at a real graph file. This placeholder is the sample
-# graph that ships with Nav2. Change "kilted" to your ROS distro name.
-route_server:
-  ros__parameters:
-    use_sim_time: true
-    base_frame: "base_footprint"
-    route_frame: "map"
-    path_density: 0.05
-    max_iterations: 0
-    graph_filepath: "/opt/ros/kilted/share/nav2_route/graphs/aws_graph.geojson"

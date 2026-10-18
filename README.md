@@ -1,224 +1,360 @@
 # RoboDojo ROS 2 Simulation
 
-ROS 2 workspace for the RoboDojo robot, including its URDF, wheel and lidar models, Gazebo gamefield, RViz configuration, SLAM, and autonomous behavior-tree maze navigation.
+A ROS 2 workspace for the **RoboDojo** robot: URDF/meshes, a Gazebo gamefield,
+SLAM, and a Nav2 navigation stack with a custom Behavior Tree for autonomous
+maze navigation.
+
+Target platform: **ROS 2 Jazzy** + **Gazebo Harmonic** (`ros_gz`), on Ubuntu 24.04.
+
+If you run ROS 2 inside a container (e.g. `distrobox`), run every `ros2`/`gz`
+command **inside that container**, not on the host.
+
+---
 
 ## Packages
 
-- `robodojo`: robot URDF, meshes, joint-state publisher, RViz configuration, Gazebo bridge, and SLAM launch files.
-- `gamefield`: Gazebo world and arena model.
-- `dojo_nav`: Nav2 configuration and navigation launch files.
-- `dojo_bt`: Custom Behavior Tree nodes (C++ plugins), autonomous mission state machine (Python), and full autonomous maze launch.
+| Package | Purpose |
+|---|---|
+| `robodojo` | Robot URDF + meshes, custom joint-state publisher, RViz config, Gazebo/SLAM launch files |
+| `gamefield` | Gazebo world (`gamefield.world`, `auto_arena.world`) and the arena model/meshes |
+| `dojo_nav` | Nav2 configuration (`nav2_params.yaml`, `twist_mux.yaml`) and `navigate.launch.py` |
+| `dojo_bt` | Custom Behavior Tree C++ plugin, Python mission state machine, custom BT XML, and the all-in-one `autonomous_maze.launch.py` |
+
+---
 
 ## Requirements
 
-Install and source a ROS 2 environment with these packages available:
+```bash
+sudo apt update
+sudo apt install -y \
+  ros-jazzy-ros-gz-sim \
+  ros-jazzy-ros-gz-bridge \
+  ros-jazzy-navigation2 \
+  ros-jazzy-nav2-bringup \
+  ros-jazzy-slam-toolbox \
+  ros-jazzy-twist-mux \
+  ros-jazzy-robot-localization \
+  ros-jazzy-behaviortree-cpp \
+  libjsoncpp-dev \
+  python3-colcon-common-extensions
+```
 
-- Gazebo Sim and `ros_gz_sim`
-- `ros_gz_bridge`
-- `robot_state_publisher`
-- `rviz2`
-- `slam_toolbox`
-- `nav2_bringup` and Nav2 stack (`nav2_bt_navigator`, `nav2_controller`, etc.)
-- `robot_localization` (EKF)
-- `behaviortree_cpp`
-- `rmw_zenoh_cpp`
-
-The commands below assume the workspace is located at `~/dojourdf`. Adjust the path if needed.
+`nav2_bringup` pulls in the Nav2 stack (`nav2_bt_navigator`, `nav2_controller`,
+`nav2_planner`, `nav2_behaviors`, `nav2_collision_monitor`, …). `twist_mux` is
+required because the velocity chain terminates in a mux (see
+[Velocity command chain](#velocity-command-chain)).
 
 ## Build
 
-From the workspace root:
+From the repository root:
 
 ```bash
-cd ~/dojourdf
 source /opt/ros/$ROS_DISTRO/setup.bash
 colcon build --symlink-install
 source install/setup.bash
 ```
 
-Source `install/setup.bash` again in each new terminal before using the workspace.
+Source `install/setup.bash` in every new terminal before launching anything.
 
-## Launch Gazebo and RViz
+---
 
-```bash
-ros2 launch robodojo gz_sim.launch.py
+## Launch files
+
+| Command | What it does |
+|---|---|
+| `ros2 launch robodojo display.launch.py` | Robot model + joint states in RViz (no Gazebo) |
+| `ros2 launch robodojo gz_sim.launch.py` | Gazebo gamefield + robot + bridge + RViz |
+| `ros2 launch robodojo slam.launch.py` | Gazebo + EKF + SLAM Toolbox (builds `/map`) |
+| `ros2 launch dojo_nav navigate.launch.py` | Gazebo + EKF + full Nav2 stack + RViz, using a saved map |
+| `ros2 launch dojo_bt autonomous_maze.launch.py` | Everything above **plus** the custom BT and the autonomous mission node |
+| `ros2 launch gamefield world_rviz.launch.py` | World inspection in RViz |
+
+The robot spawns at approximately `x = -2.7`, `y = -1.2`, `z = 0.6`, yaw `0`.
+
+### Gazebo GUI shows a black screen / the world dies instantly
+
+`gz-transport` finds peers over UDP multicast. On hosts whose interfaces do not
+loop multicast back (common on Wi-Fi), the GUI can never discover the server, so
+it hangs in `createGui` and kills the server. The symptom in the log is:
+
+```text
+no subscriber to /gazebo/starting_world
 ```
 
-This starts the gamefield, robot state publisher, custom joint-state publisher, Gazebo to ROS bridge, and RViz. The robot is spawned near the back-left start area at approximately:
+**Every launch file in this repository that starts Gazebo already pins discovery
+to loopback**, so no shell configuration is needed:
 
-- `x = -2.7`
-- `y = 1.2`
-- `z = 0.6`
-- yaw `= 0`
+```python
+SetEnvironmentVariable(name='GZ_IP', value='127.0.0.1'),   # gz-transport
+SetEnvironmentVariable(name='IGN_IP', value='127.0.0.1'),  # legacy name
+```
 
-The exact meaning of back-left depends on the world coordinate orientation.
+If you start `gz sim` **by hand** outside these launch files, export the same
+variables first (or add them to your shell rc yourself — the repository does not
+modify your shell configuration):
 
-## Launch SLAM
+```bash
+export GZ_IP=127.0.0.1
+export IGN_IP=127.0.0.1
+```
+
+Other useful fallbacks for headless/VMs: `LIBGL_ALWAYS_SOFTWARE=1` for software
+rendering and `QT_QPA_PLATFORM=xcb` if the GUI misbehaves under Wayland.
+
+---
+
+## SLAM
 
 ```bash
 ros2 launch robodojo slam.launch.py
 ```
 
-This starts Gazebo, the robot localization EKF, and SLAM Toolbox using `src/robodojo/config/slam.yaml`. Drive the robot with `/cmd_vel`; SLAM Toolbox uses `/scan` and the `odom` to `base_link` transform to build `/map`.
-
-The Gazebo world must load the `gz-sim-imu-system` plugin for the robot IMU sensor to produce samples. The SLAM launch bridges the simulator IMU to ROS as `/imu` and starts the EKF, which publishes filtered odometry on `/odometry/filtered`.
-
-Verify the sensor and SLAM inputs in another sourced terminal:
+This starts Gazebo, the `robot_localization` EKF (`/odometry/filtered`) and SLAM
+Toolbox, which builds `/map` from `/scan`. Verify the inputs:
 
 ```bash
-ros2 topic hz /imu
 ros2 topic hz /scan
+ros2 topic hz /imu
 ros2 topic echo /odometry/filtered --once
-ros2 topic echo /map --once
 ```
 
-If `/imu` exists but `ros2 topic hz /imu` receives no messages, restart the simulation after rebuilding so Gazebo loads the current world file:
+Save a map once the arena has been driven through:
 
 ```bash
-colcon build --symlink-install
-source install/setup.bash
-ros2 launch robodojo slam.launch.py
+ros2 run nav2_map_server map_saver_cli -f maps/arena
 ```
 
-## Autonomous Behavior Tree Maze Navigation (`dojo_bt`)
-
-The `dojo_bt` package provides custom Behavior Tree C++ plugins for Nav2, a Python mission state machine, and an all-in-one launch file for fully autonomous maze exploration.
-
-### 1. Build
+The default map used by the navigation launches is `maps/arena.yaml`. Both
+`navigate.launch.py` and `autonomous_maze.launch.py` locate it automatically, or
+you can override it:
 
 ```bash
-cd ~/dojourdf
-source /opt/ros/$ROS_DISTRO/setup.bash
-colcon build --symlink-install --packages-up-to dojo_bt
-source install/setup.bash
+ros2 launch dojo_bt autonomous_maze.launch.py map:=/absolute/path/to/my_map.yaml
 ```
 
-### 2. Create a map
+---
 
-The autonomous launch requires a pre-built Nav2 occupancy-grid map. Generate one by running SLAM and driving the robot through the maze, then saving:
-
-```bash
-ros2 launch robodojo slam.launch.py
-```
-
-In another sourced terminal, drive the robot and save the map:
-
-```bash
-ros2 run nav2_map_server map_saver_cli -f ~/dojourdf/maps/arena
-```
-
-### 3. Launch autonomous maze navigation
+## Autonomous maze navigation
 
 ```bash
 ros2 launch dojo_bt autonomous_maze.launch.py
 ```
 
-This single launch brings up:
-- Gazebo with the gamefield world and `robodojo` robot
-- EKF (`robot_localization`) fusing odometry + IMU
-- Nav2 stack (localization, controller, planner, BT navigator, behaviors, collision monitor, lifecycle manager)
-- Custom BT plugins (`dojo_bt_plugins.so`) loaded into `nav2_bt_navigator`
-- Autonomous mission node (Python state machine)
+This brings up Gazebo + EKF + Nav2 (localization, controller, planner, smoother,
+behaviors, collision monitor, BT navigator, waypoint follower, lifecycle
+manager) + `twist_mux` + the custom Behavior Tree + the autonomous mission node.
 
-### 4. Send a mission command
+### Sending a mission
 
-Publish a JSON mission to `/dojo_mission`:
+Missions are JSON on `/dojo_mission` (a `std_msgs/String`). Supported actions:
+
+| Action | Payload | Meaning |
+|---|---|---|
+| `EXPLORE` | – | Frontier-based exploration |
+| `GOAL` | `pose: {x, y [, z, qz, qw, frame_id]}` | Navigate to one pose |
+| `WAYPOINTS` | `poses: [{x, y, …}, …]` | Follow a sequence of poses |
+| `DOCK` | `dock_pose: {x, y, …}` | Return to the dock pose |
+| `CANCEL` | – | Cancel the current mission |
+| `STATUS` | – | Re-publish the current state summary |
 
 ```bash
-ros2 topic pub /dojo_mission std_msgs/msg/String 'data: "{\"mission\": \"explore\", \"goal\": {\"x\": 3.0, \"y\": 0.0, \"qz\": 0.0, \"qw\": 1.0}}"'
+# Navigate to a single pose (map frame; qz/qw give the yaw quaternion)
+ros2 topic pub --once /dojo_mission std_msgs/msg/String \
+  'data: "{\"action\": \"GOAL\", \"pose\": {\"x\": 1.5, \"y\": 0.0, \"qz\": 0.0, \"qw\": 1.0}}"'
+
+# Explore autonomously
+ros2 topic pub --once /dojo_mission std_msgs/msg/String \
+  'data: "{\"action\": \"EXPLORE\"}"'
+
+# Cancel
+ros2 topic pub --once /dojo_mission std_msgs/msg/String \
+  'data: "{\"action\": \"CANCEL\"}"'
 ```
 
-### 5. Monitor status
+### Monitoring
 
 ```bash
-ros2 topic echo /dojo_mission/status
-ros2 topic echo /dojo_mission/state
+ros2 topic echo /dojo_mission/status   # human-readable
+ros2 topic echo /dojo_mission/state    # JSON state machine snapshot
 ```
 
-### Key files
+`/dojo_mission/state` is published at 1 Hz and contains `state`, `mission_type`,
+`mission_active`, `is_stuck`, `min_scan_range`, `pose_x`, `pose_y`, … The
+Behavior Tree reads this topic for its collision/stuck decisions.
+
+---
+
+## Velocity command chain
+
+All velocity stages use **plain `geometry_msgs/Twist`** (every node sets
+`enable_stamped_cmd_vel: false`, matching the Gazebo bridge):
+
+```text
+controller_server ──► cmd_vel_nav
+        velocity_smoother ──► cmd_vel_smoothed
+        collision_monitor ──► cmd_vel_safe          ┐
+                                                     ├─► twist_mux ──► cmd_vel ──► Gazebo
+/cmd_vel_emergency (mission node + BT EmergencyStop) ┘   (priority 100)
+                                                          navigation priority 10
+```
+
+`twist_mux` arbitrates so an emergency stop always beats navigation commands.
+`/cmd_vel_emergency` is published by:
+
+* `autonomous_mission_node` — zero velocity while a collision is imminent, plus
+  its timed back-up/spin recovery manoeuvres.
+* the BT `EmergencyStop` node — zero velocity whenever `IsCollisionImminent`.
+
+Config: `src/dojo_nav/config/twist_mux.yaml`.
+
+---
+
+## Behavior Tree
+
+`src/dojo_bt/behavior_trees/maze/autonomous_maze.xml` is loaded by
+`nav2_bt_navigator` via `default_nav_to_pose_bt_xml`
+(`src/dojo_bt/config/dojo_bt_params.yaml`). Shape:
+
+```text
+RecoveryNode (6 retries)
+├── PipelineSequence
+│   ├── RateController(1 Hz) → RecoveryNode(1) → ComputePathToPose + ClearGlobalCostmap
+│   └── RecoveryNode(1) → GuardedFollowPath
+│         ├── EmergencyStopGate   (IsCollisionImminent → EmergencyStop, else pass)
+│         ├── Inverter(IsCollisionImminent)   (only drive when the path is clear)
+│         └── FollowPath
+└── RecoveryStrategy
+      ├── MissionStuck  → BackUp + Spin
+      ├── IsCollisionImminent → BackUp + Wait
+      └── RoundRobin (clear costmaps / Spin / Wait)
+```
+
+The tree only has to reach the goal handed to it by the navigator. Mission
+orchestration (mission types, frontier selection, goal sequencing, recovery
+timing) lives in `autonomous_mission_node`.
+
+Custom nodes are provided by `libdojo_bt_plugins.so`
+(`src/dojo_bt/src/bt_conditions.cpp`, `bt_actions.cpp`) and registered through
+`plugin_lib_names` in `dojo_bt_params.yaml`. Nav2 *appends* that list to its own
+built-in plugin list, so the stock Nav2 nodes remain available.
+
+> **Naming note:** two custom nodes deliberately avoid Nav2's node IDs, because
+> BehaviorTree.CPP throws on duplicate registrations: our stuck check is
+> `MissionStuck` (Nav2 already has `IsStuck`) and our dock action is
+> `MissionDock` (Nav2 already has `DockRobot`).
+
+---
+
+## Topics
+
+| Topic | Type | Notes |
+|---|---|---|
+| `/cmd_vel` | `geometry_msgs/Twist` | Final command to the Gazebo diff-drive plugin |
+| `/cmd_vel_nav` | `geometry_msgs/Twist` | Controller output |
+| `/cmd_vel_smoothed` | `geometry_msgs/Twist` | Smoother output |
+| `/cmd_vel_safe` | `geometry_msgs/Twist` | Collision-monitor output |
+| `/cmd_vel_emergency` | `geometry_msgs/Twist` | Highest-priority mux input |
+| `/scan` | `sensor_msgs/LaserScan` | Lidar |
+| `/odom` | `nav_msgs/Odometry` | Wheel odometry |
+| `/imu` | `sensor_msgs/Imu` | IMU |
+| `/odometry/filtered` | `nav_msgs/Odometry` | EKF output |
+| `/map` | `nav_msgs/OccupancyGrid` | SLAM map |
+| `/dojo_mission` | `std_msgs/String` | Mission commands (JSON) |
+| `/dojo_mission/state` | `std_msgs/String` | State machine snapshot (JSON, 1 Hz) |
+| `/dojo_mission/status` | `std_msgs/String` | Human-readable status |
+| `/tf`, `/tf_static` | `tf2_msgs/TFMessage` | Transforms |
+
+Manual stop:
+
+```bash
+ros2 topic pub --once /cmd_vel_emergency geometry_msgs/msg/Twist \
+  "{linear: {x: 0.0}, angular: {z: 0.0}}"
+```
+
+---
+
+## Key files
 
 | File | Purpose |
 |---|---|
-| `src/dojo_bt/launch/autonomous_maze.launch.py` | Top-level launch file |
-| `src/dojo_bt/config/dojo_bt_params.yaml` | BT and mission parameters |
-| `src/dojo_bt/src/bt_actions.cpp` | C++ custom BT action nodes |
-| `src/dojo_bt/src/bt_conditions.cpp` | C++ custom BT condition nodes |
-| `src/dojo_bt/dojo_bt/autonomous_mission_node.py` | Python mission state machine (ROS2 node) |
+| `src/dojo_bt/launch/autonomous_maze.launch.py` | All-in-one autonomous launch |
+| `src/dojo_nav/launch/navigate.launch.py` | Nav2 on a saved map |
+| `src/dojo_nav/config/nav2_params.yaml` | Nav2 parameters (all nodes) |
+| `src/dojo_nav/config/twist_mux.yaml` | Velocity arbitration (`/cmd_vel_emergency`) |
+| `src/dojo_bt/config/dojo_bt_params.yaml` | BT XML path + `plugin_lib_names` |
+| `src/dojo_bt/behavior_trees/maze/autonomous_maze.xml` | The Behavior Tree |
+| `src/dojo_bt/src/bt_conditions.cpp` | Custom BT conditions |
+| `src/dojo_bt/src/bt_actions.cpp` | Custom BT actions |
+| `src/dojo_bt/dojo_bt/autonomous_mission_node.py` | ROS interface / action clients |
 | `src/dojo_bt/dojo_bt/mission_state_machine.py` | State machine logic |
-| `src/dojo_bt/behavior_trees/maze/autonomous_maze.xml` | BT XML loaded by Nav2 BT navigator |
+| `src/robodojo/urdf/robodojo.urdf` | Robot description |
+| `maps/arena.yaml` | Default Nav2 map |
 
-## Useful topics
-
-- `/cmd_vel`: robot velocity commands
-- `/scan`: lidar scan
-- `/odom`: wheel odometry
-- `/imu`: IMU data
-- `/odometry/filtered`: EKF fused pose
-- `/tf`: transforms
-- `/map`: SLAM map
-- `/dojo_mission`: mission commands (JSON)
-- `/dojo_mission/state`: mission state machine status (JSON)
-- `/dojo_mission/status`: human-readable status messages
-- `/joint_states`: wheel and lidar joint states
-
-Example command to stop the robot:
-
-```bash
-ros2 topic pub --once /cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.0}, angular: {z: 0.0}}"
-```
-
-## Robot description and RViz
-
-The robot description is stored in:
-
-```text
-src/robodojo/urdf/robodojo.urdf
-```
-
-The RViz configuration is stored in:
-
-```text
-src/robodojo/config/robodojo.rviz
-```
-
-The custom wheel joint publisher is implemented in:
-
-```text
-src/robodojo/robodojo/joint_state_publisher_node.py
-```
+---
 
 ## Troubleshooting
 
-### Gazebo cannot find `model://gamefield_arena`
+**No `/scan`, `/odom`, `/imu`, or `/clock`** — the `ros_gz_bridge` did not start
+or Gazebo is not running. Check for the bridge in the launch output, and that
+the launch printed no Gazebo errors.
 
-Rebuild and source the workspace so the installed model directory is available:
-
-```bash
-colcon build --symlink-install
-source install/setup.bash
-ros2 launch robodojo gz_sim.launch.py
-```
-
-The launch file sets `GZ_SIM_RESOURCE_PATH` to the workspace package and gamefield model locations. If starting Gazebo manually, export the resource path first:
+**`model://gamefield_arena` not found** — rebuild so the model files are
+installed, and make sure `GZ_SIM_RESOURCE_PATH` includes the gamefield models
+directory. The launch files set this automatically; for a manual `gz sim`:
 
 ```bash
-export GZ_SIM_RESOURCE_PATH="$PWD/install/gamefield/share/gamefield/models:$PWD/install/robodojo/share/robodojo"
+export GZ_SIM_RESOURCE_PATH="$PWD/install/robodojo/share:$PWD/install/gamefield/share/gamefield/models"
 ```
 
-### Zenoh router warning
+**Nav2 nodes stay `unconfigured`** — check the `lifecycle_manager_navigation`
+output; a missing plugin or parameters file makes a node fail to configure and
+the manager then aborts the whole stack.
 
-The launch files start a Zenoh router with `rmw_zenohd`. If starting nodes manually, start the router first:
+**BT fails to load in `bt_navigator`** — verify the tree:
+`default_nav_to_pose_bt_xml` must point at an existing XML, every node ID must be
+registered, and no custom node ID may collide with a stock Nav2 one
+(BehaviorTree.CPP throws `ID [...] already registered`).
+
+**The robot never moves** — check, in order:
 
 ```bash
-ros2 run rmw_zenoh_cpp rmw_zenohd
+ros2 topic hz /cmd_vel_nav        # controller producing commands?
+ros2 topic hz /cmd_vel_safe       # collision monitor passing them through?
+ros2 topic hz /cmd_vel            # twist_mux output?
+ros2 topic echo /dojo_mission/state --once   # is_stuck / min_scan_range sane?
 ```
 
-### Clean generated build files
+A `min_scan_range` of `null` means "no obstacle data"; the BT treats that as
+"clear". A stale `null`-as-`0.0` reading would otherwise look like a permanent
+collision.
 
-Build output is ignored by Git. To rebuild from a clean workspace:
+**Clean rebuild**
 
 ```bash
 rm -rf build install log
 colcon build --symlink-install
 source install/setup.bash
 ```
+
+---
+
+## Notes on this branch
+
+* Gazebo discovery is pinned to loopback in every launch that starts Gazebo
+  (`GZ_IP`/`IGN_IP`), fixing the black-screen/instant-death failure.
+* `default_bt_xml_filename` (removed in Nav2 Galactic) was replaced with
+  `default_nav_to_pose_bt_xml` / `default_nav_through_poses_bt_xml`; the old name
+  was silently ignored, so the custom tree never loaded.
+* `autonomous_maze.xml` was rewritten as a valid `BTCPP_format="4"` tree, and
+  the custom BT node IDs `IsStuck`/`DockRobot` were renamed to
+  `MissionStuck`/`MissionDock` to avoid the duplicate-registration failure.
+* `/cmd_vel_emergency` is now actually connected: `collision_monitor` outputs
+  `cmd_vel_safe` and `twist_mux` arbitrates it against the emergency topic before
+  `/cmd_vel` reaches Gazebo.
+* Hard-coded, user-specific paths (`/home/keedastro/...`,
+  `/home/damian/...`, `/opt/ros/kilted/...`) were removed from the launch files,
+  `nav2_params.yaml` and `measure.py`; the default map is discovered from the
+  repository.
+* Node parameters that targeted non-existent nodes were removed, and
+  `dojo_bt`/`dojo_nav` `package.xml` files now declare the packages their launch
+  files actually use.

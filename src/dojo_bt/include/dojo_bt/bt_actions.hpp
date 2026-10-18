@@ -9,6 +9,8 @@
 #include "rclcpp/rclcpp.hpp"
 #include "geometry_msgs/msg/twist.hpp"
 
+#include "dojo_bt/bt_conditions.hpp"
+
 namespace dojo_bt
 {
 
@@ -28,9 +30,11 @@ private:
 };
 
 /**
- * Idle state: hold robot stationary and wait for a mission.
+ * Idle state: hold robot stationary until the mission node reports that a
+ * mission has been commanded. Reads /dojo_mission/state via
+ * MissionStateListener.
  */
-class IdleState : public BT::StatefulActionNode
+class IdleState : public BT::StatefulActionNode, public MissionStateListener
 {
 public:
   IdleState(const std::string & name, const BT::NodeConfig & config);
@@ -40,7 +44,6 @@ public:
   void onHalted() override;
 
 private:
-  rclcpp::Node::SharedPtr node_;
   rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_pub_;
 };
 
@@ -58,11 +61,14 @@ public:
 
 /**
  * Dock robot: final low-speed approach to a dock marker.
+ *
+ * NOTE: registered as "MissionDock", NOT "DockRobot" — Nav2 ships a DockRobot
+ * behaviour (nav2_docking) and BehaviorTree.CPP throws on duplicate IDs.
  */
-class DockRobot : public BT::SyncActionNode
+class MissionDock : public BT::SyncActionNode
 {
 public:
-  DockRobot(const std::string & name, const BT::NodeConfig & config);
+  MissionDock(const std::string & name, const BT::NodeConfig & config);
   static BT::PortsList providedPorts();
   BT::NodeStatus tick() override;
 

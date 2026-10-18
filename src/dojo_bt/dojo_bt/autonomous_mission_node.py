@@ -34,7 +34,7 @@ from nav2_msgs.action import NavigateToPose, NavigateThroughPoses
 from std_msgs.msg import String
 from tf2_ros import Buffer, TransformListener
 
-from .mission_state_machine import (
+from dojo_bt.mission_state_machine import (
     MissionStateMachine,
     MissionState,
     MissionType,

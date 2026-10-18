@@ -1,10 +1,17 @@
-# measure.py
+# measure.py — derive the gamefield floor/wall offsets from the arena meshes.
+#
+# Usage (from the repository root, with the same venv/ROS env that provides
+# trimesh):
+#     python3 src/measure.py
+from pathlib import Path
+
 import trimesh
-base = "/home/keedastro/dojourdf/src/gamefield/models/gamefield_arena/meshes/"
+
+base = Path(__file__).resolve().parent / "gamefield" / "models" / "gamefield_arena" / "meshes"
 s = 0.001  # same scale as the SDF
 
-f = trimesh.load(base + "gamefield_floor.stl").bounds * s
-w = trimesh.load(base + "gamefield_walls.stl").bounds * s
+f = trimesh.load(str(base / "gamefield_floor.stl")).bounds * s
+w = trimesh.load(str(base / "gamefield_walls.stl")).bounds * s
 
 print("floor min/max (m):", f[0], f[1])
 print("walls min/max (m):", w[0], w[1])

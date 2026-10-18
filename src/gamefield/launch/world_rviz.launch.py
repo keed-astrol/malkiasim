@@ -2,7 +2,7 @@ from pathlib import Path
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import AppendEnvironmentVariable, IncludeLaunchDescription
+from launch.actions import AppendEnvironmentVariable, IncludeLaunchDescription, SetEnvironmentVariable
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
 
@@ -14,6 +14,11 @@ def generate_launch_description():
     rviz_config = package_share / 'config' / 'gamefield.rviz'
 
     return LaunchDescription([
+        # Pin gz-transport discovery to loopback: multicast peer discovery is
+        # unreliable on some hosts (Wi-Fi w/o multicast loopback), which leaves
+        # the GUI unable to find the server (black screen).
+        SetEnvironmentVariable(name='GZ_IP', value='127.0.0.1'),
+        SetEnvironmentVariable(name='IGN_IP', value='127.0.0.1'),
         AppendEnvironmentVariable(
             name='GZ_SIM_RESOURCE_PATH',
             value=str(package_share / 'models'),

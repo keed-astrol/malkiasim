@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-#/home/keedastro/dojourdf/src/robodojo/robodojo/joint_state_publisher_node.py
+"""Custom joint-state publisher: drives the RoboDojo wheel/lidar joint states
+from wheel odometry so the URDF reflects the simulated motion."""
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import JointState

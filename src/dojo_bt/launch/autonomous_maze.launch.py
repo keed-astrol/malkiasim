@@ -20,6 +20,17 @@ from launch.actions import (
 from launch.substitutions import LaunchConfiguration
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
+from launch_ros.descriptions import ParameterFile
+
+
+def _default_map() -> Path:
+    """Locate maps/arena.yaml by walking up from this file (works from
+    src/ and from install/) instead of hardcoding a user-specific path."""
+    for parent in Path(__file__).resolve().parents:
+        candidate = parent / 'maps' / 'arena.yaml'
+        if candidate.is_file():
+            return candidate
+    raise FileNotFoundError('maps/arena.yaml not found above ' + str(Path(__file__).resolve()))
 
 
 def generate_launch_description():
@@ -33,9 +44,10 @@ def generate_launch_description():
     robot_desc = pkg_robodojo / 'urdf' / 'robodojo.urdf'
     ekf_cfg = pkg_robodojo / 'config' / 'ekf.yaml'
     nav2_cfg = pkg_dojo_nav / 'config' / 'nav2_params.yaml'
+    twist_mux_cfg = pkg_dojo_nav / 'config' / 'twist_mux.yaml'
     bt_cfg = pkg_dojo_bt / 'config' / 'dojo_bt_params.yaml'
     rviz_cfg = pkg_dojo_nav / 'config' / 'dojo_nav.rviz'
-    default_map = Path('/home/keedastro/dojourdf/maps/arena.yaml')
+    default_map = _default_map()
 
     # ─── Gazebo + robot bringup ─────────────────────────────────
     gz_sim = IncludeLaunchDescription(
@@ -111,8 +123,16 @@ def generate_launch_description():
 
     nav_remaps = [('/tf', 'tf'), ('/tf_static', 'tf_static')]
 
-    # Merge nav2 params with our BT params
-    nav_params = [str(nav2_cfg), str(bt_cfg), {'use_sim_time': True}]
+    # Merge nav2 params with our BT params.
+    # ParameterFile(allow_substs=True) is required for the
+    # "$(find-pkg-share dojo_bt)/..." path in dojo_bt_params.yaml to be
+    # expanded — plain string paths skip substitution and would be passed
+    # through literally.
+    nav_params = [
+        ParameterFile(str(nav2_cfg), allow_substs=True),
+        ParameterFile(str(bt_cfg), allow_substs=True),
+        {'use_sim_time': True},
+    ]
 
     nav_nodes = [
         Node(
@@ -174,6 +194,17 @@ def generate_launch_description():
             parameters=nav_params,
             remappings=nav_remaps,
         ),
+        # Final velocity arbitration: cmd_vel_safe (navigation) vs
+        # /cmd_vel_emergency (mission e-stop); publishes the winner on cmd_vel
+        # for the Gazebo diff-drive plugin.
+        Node(
+            package='twist_mux',
+            executable='twist_mux',
+            name='twist_mux',
+            output='screen',
+            parameters=[twist_mux_cfg, {'use_sim_time': True}],
+            remappings=[('cmd_vel_out', 'cmd_vel')],
+        ),
         Node(
             package='nav2_lifecycle_manager',
             executable='lifecycle_manager',
@@ -225,6 +256,12 @@ def generate_launch_description():
             name='GZ_SIM_RESOURCE_PATH',
             value=f'{pkg_robodojo.parent}:{pkg_gamefield / "models"}',
         ),
+        # Pin gz-transport discovery to loopback: multicast peer discovery is
+        # unreliable on some hosts (Wi-Fi w/o multicast loopback), which leaves
+        # the GUI unable to find the server (black screen / "no subscriber to
+        # /gazebo/starting_world").
+        SetEnvironmentVariable(name='GZ_IP', value='127.0.0.1'),
+        SetEnvironmentVariable(name='IGN_IP', value='127.0.0.1'),
         gz_sim,
         robot_state_pub,
         gz_bridge,
