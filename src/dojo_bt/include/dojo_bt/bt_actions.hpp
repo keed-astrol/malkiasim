@@ -15,7 +15,14 @@ namespace dojo_bt
 {
 
 /**
- * Emergency stop: publish zero cmd_vel immediately.
+ * Emergency stop: publish zero velocity on /cmd_vel_emergency.
+ *
+ * Available to behaviour trees, but the stock RoboDojo tree does not use it:
+ * while a mission runs, autonomous_mission_node is the single writer of
+ * /cmd_vel_emergency (it publishes the stop *and* the escape manoeuvre). Two
+ * publishers on that high-priority mux input would fight each other, so the
+ * mission node keeps ownership and the tree only withholds controller commands
+ * via IsCollisionImminent.
  */
 class EmergencyStop : public BT::SyncActionNode
 {

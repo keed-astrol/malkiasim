@@ -194,16 +194,23 @@ controller_server ──► cmd_vel_nav
         velocity_smoother ──► cmd_vel_smoothed
         collision_monitor ──► cmd_vel_safe          ┐
                                                      ├─► twist_mux ──► cmd_vel ──► Gazebo
-/cmd_vel_emergency (mission node + BT EmergencyStop) ┘   (priority 100)
-                                                          navigation priority 10
+/cmd_vel_emergency (mission node)                   ┘   (priority 100)
+                                                         navigation priority 10
 ```
 
-`twist_mux` arbitrates so an emergency stop always beats navigation commands.
-`/cmd_vel_emergency` is published by:
+`twist_mux` arbitrates so an emergency command always beats navigation commands.
+`/cmd_vel_emergency` has a **single writer**, `autonomous_mission_node`:
 
-* `autonomous_mission_node` — zero velocity while a collision is imminent, plus
-  its timed back-up/spin recovery manoeuvres.
-* the BT `EmergencyStop` node — zero velocity whenever `IsCollisionImminent`.
+* zero velocity during the hard-stop phase of a collision emergency, and
+* its timed reverse/spin escape manoeuvre, and
+* its timed back-up/spin recovery manoeuvres.
+
+Keeping one writer matters: `twist_mux` passes the newest message on the
+highest-priority input, so a second publisher on the same topic would fight the
+mission node's escape (a fast zero-publisher would simply out-vote it). The
+`dojo_bt` `EmergencyStop` node is still registered for use in other trees, but
+the shipped tree deliberately does **not** publish zeros — it withholds
+controller commands via `IsCollisionImminent` and lets the mission node arbitrate.
 
 Config: `src/dojo_nav/config/twist_mux.yaml`.
 
@@ -220,7 +227,6 @@ RecoveryNode (6 retries)
 ├── PipelineSequence
 │   ├── RateController(1 Hz) → RecoveryNode(1) → ComputePathToPose + ClearGlobalCostmap
 │   └── RecoveryNode(1) → GuardedFollowPath
-│         ├── EmergencyStopGate   (IsCollisionImminent → EmergencyStop, else pass)
 │         ├── Inverter(IsCollisionImminent)   (only drive when the path is clear)
 │         └── FollowPath
 └── RecoveryStrategy
@@ -328,6 +334,15 @@ A `min_scan_range` of `null` means "no obstacle data"; the BT treats that as
 "clear". A stale `null`-as-`0.0` reading would otherwise look like a permanent
 collision.
 
+`min_scan_range` is measured over the **forward cone** of the 360° lidar (±35°),
+not the whole sweep. Using the global minimum looked "safer" but froze the robot
+in this arena: the maze walls beside and behind it are permanently inside the
+0.25 m emergency radius, so it held zero velocity forever. The whole-sweep and
+rear-cone minima are still published as `min_scan_range_all` /
+`min_scan_range_rear`, and the emergency state is escapable: after a 0.3 s hard
+stop the robot reverses (or spins in place when the rear is also blocked) until
+the way ahead is clear.
+
 **Clean rebuild**
 
 ```bash
@@ -351,6 +366,11 @@ source install/setup.bash
 * `/cmd_vel_emergency` is now actually connected: `collision_monitor` outputs
   `cmd_vel_safe` and `twist_mux` arbitrates it against the emergency topic before
   `/cmd_vel` reaches Gazebo.
+* The collision gate was made **directional** and **escapable**. It used the
+  minimum range over the whole 360° sweep, so in this arena (walls always within
+  25 cm to the side or rear) the robot sat in `EMERGENCY` publishing zeros
+  forever. It now watches the forward cone and, when blocked, stops briefly and
+  then backs away instead of latching.
 * Hard-coded, user-specific paths (`/home/keedastro/...`,
   `/home/damian/...`, `/opt/ros/kilted/...`) were removed from the launch files,
   `nav2_params.yaml` and `measure.py`; the default map is discovered from the

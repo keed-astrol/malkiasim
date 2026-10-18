@@ -8,10 +8,11 @@
     Nav2's planning + control pipeline and layers RoboDojo safety on top:
 
       ComputePathToPose  ->  FollowPath (with replanning at 1 Hz)
-        * Collision gate: while the mission node reports an obstacle inside the
-          emergency stop radius, publish zero velocity on /cmd_vel_emergency and
-          do not command the controller. When the path ahead is clear the gate is
-          transparent.
+        * Collision gate: while the mission node reports something inside the
+          collision radius of the direction of travel, the controller is not
+          commanded and the step fails so recovery runs. The mission node owns
+          /cmd_vel_emergency (hard stop + escape manoeuvre), so nothing in this
+          tree publishes competing zeros on that topic.
       Recovery (runs only when a goal step fails)
         * stuck  (mission node "is_stuck")  -> back up + spin
         * collision imminent                -> back up + wait
@@ -24,7 +25,7 @@
     the goal placed on the {goal} blackboard by the navigator.
 
     Custom node IDs provided by dojo_bt_plugins:
-      IsCollisionImminent, EmergencyStop, MissionStuck
+      IsCollisionImminent, MissionStuck, EmergencyStop
     (MissionStuck is deliberately not named "IsStuck": Nav2 already registers an
      IsStuck condition and BehaviorTree.CPP throws on duplicate IDs.)
   -->
@@ -45,18 +46,10 @@
         <!-- Follow the path, guarded by the collision gate. -->
         <RecoveryNode number_of_retries="1" name="CollisionSafeFollowPath">
           <Sequence name="GuardedFollowPath">
-            <!-- Side-effect gate: emit an emergency stop if a collision is
-                 imminent. AlwaysSuccess keeps this branch transparent when the
-                 path ahead is clear. -->
-            <Fallback name="EmergencyStopGate">
-              <Sequence name="StopOnImminentCollision">
-                <IsCollisionImminent/>
-                <EmergencyStop/>
-              </Sequence>
-              <AlwaysSuccess/>
-            </Fallback>
-            <!-- Only hand control to the controller when the path is clear.
-                 Fails the step otherwise, which triggers recovery. -->
+            <!-- Only hand control to the controller when the way ahead is clear.
+                 Fails the step otherwise, which triggers recovery. The mission
+                 node is the single publisher of /cmd_vel_emergency, so the tree
+                 deliberately does not emit its own zero velocity here. -->
             <Inverter name="ProceedOnlyWhenClear">
               <IsCollisionImminent/>
             </Inverter>

@@ -73,7 +73,8 @@ public:
 
 /**
  * Succeeds while the mission node reports an obstacle inside the emergency-stop
- * radius (its JSON "min_scan_range" field, in metres).
+ * radius of the cone the robot is travelling into (its JSON "min_scan_range"
+ * field, in metres, measured over the forward sector of the 360 deg lidar).
  */
 class IsCollisionImminent : public BT::ConditionNode, public MissionStateListener
 {
