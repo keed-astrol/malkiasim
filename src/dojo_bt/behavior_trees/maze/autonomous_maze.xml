@@ -7,7 +7,7 @@
     Loaded by nav2_bt_navigator as the default NavigateToPose tree. It drives
     Nav2's planning + control pipeline and layers RoboDojo safety on top:
 
-      ComputePathToPose  ->  FollowPath (with replanning at 0.5 Hz)
+      ComputePathToPose  ->  FollowPath (with replanning at 0.3 Hz)
         * Safety: the collision_monitor stops the wheels for the real swept
           footprint. The tree only reacts when a step fails; the mission node
           keeps a short reverse escape for a wedged rover.
@@ -32,10 +32,11 @@
     <RecoveryNode number_of_retries="6" name="NavigateToPoseRecovery">
       <PipelineSequence name="NavigateWithReplanning">
 
-        <!-- Replan at 0.5 Hz while following. Faster replanning made the path
+        <!-- Replan at 0.3 Hz while following. Faster replanning made the path
              flip between near-equal options in the tight divisions before the
-             controller could commit, which read as the rover dithering. -->
-        <RateController hz="0.5">
+             controller could commit, which read as the rover dithering; 0.3 Hz
+             gives it 3.3 s (about 0.5 m at 0.15 m/s) on one path. -->
+        <RateController hz="0.3">
           <RecoveryNode number_of_retries="1" name="ComputePathToPose">
             <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased"/>
             <ClearEntireCostmap name="ClearGlobalCostmap-Context"
@@ -68,12 +69,12 @@
       <Fallback name="RecoveryStrategy">
         <Sequence name="StuckRecovery">
           <MissionStuck/>
-          <BackUp backup_dist="0.15" backup_speed="0.15"/>
+          <BackUp backup_dist="0.10" backup_speed="0.06"/>
           <Spin spin_dist="1.57"/>
         </Sequence>
         <Sequence name="CollisionRecovery">
           <IsCollisionImminent/>
-          <BackUp backup_dist="0.20" backup_speed="0.15"/>
+          <BackUp backup_dist="0.12" backup_speed="0.06"/>
           <Wait wait_duration="1.0"/>
         </Sequence>
         <RoundRobin name="GenericRecovery">

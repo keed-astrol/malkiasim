@@ -151,6 +151,13 @@ def generate_launch_description():
             parameters=[{
                 'use_sim_time': True,
                 'autostart': True,
+                # The bond handshake happens while slam_toolbox's on_activate is
+                # still spinning up the mapper; the default 4 s timer then
+                # expires, the manager aborts bringup and slam_toolbox is left
+                # *inactive* - no /map, no map->odom, so Nav2's costmaps block
+                # on "Invalid frame ID map" and EXPLORE can never start. 0
+                # disables the bond check (the node is in the same launch).
+                'bond_timeout': 0.0,
                 'node_names': ['slam_toolbox'],
             }],
         ),
@@ -248,6 +255,9 @@ def generate_launch_description():
             parameters=[{
                 'use_sim_time': True,
                 'autostart': True,
+                # Same reason as lifecycle_manager_slam: at real_time_factor 0.6
+                # the 4 s bond window is tight enough to abort a good bringup.
+                'bond_timeout': 0.0,
                 'node_names': [
                     'controller_server',
                     'smoother_server',

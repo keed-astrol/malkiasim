@@ -106,11 +106,11 @@ class AutonomousMissionNode(Node):
     WEDGE_MIN_TURN_MOTION = 0.1  # rad/s measured
     # The emergency channel outranks the collision monitor, so this reverse is
     # the one motion nothing else guards. Keep it short, slow and rear-checked.
-    WEDGE_REVERSE_SPEED = 0.06   # m/s
-    WEDGE_REVERSE_TIME = 1.0     # s  (<= 0.06 m of travel)
+    WEDGE_REVERSE_SPEED = 0.05   # m/s
+    WEDGE_REVERSE_TIME = 0.8     # s  (<= 4 cm of travel)
     WEDGE_COOLDOWN = 3.0         # s between escapes
-    WEDGE_MIN_REAR = 0.30        # m: rear clearance needed to START reversing
-    WEDGE_ABORT_REAR = 0.22      # m: abort the reverse if the rear gets closer
+    WEDGE_MIN_REAR = 0.45        # m: rear clearance needed to START reversing
+    WEDGE_ABORT_REAR = 0.35      # m: abort the reverse if the rear gets closer
 
     # Stuck recovery: this node only bookkeeps. The tree's MissionStuck branch
     # owns the actual back-up/spin so two systems never fight over the wheels.

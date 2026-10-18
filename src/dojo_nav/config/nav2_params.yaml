@@ -107,7 +107,12 @@ controller_server:
       stateful: true
       plugin: "nav2_controller::SimpleGoalChecker"
       xy_goal_tolerance: 0.15
-      yaw_goal_tolerance: 0.25
+      # Any final heading. Spinning on arrival was the worst part of every
+      # manoeuvre: the rover reaches a frontier, pivots (corner clipping a wall
+      # in a 0.42 m corridor), then EXPLORE sends the next frontier with another
+      # heading and it pivots again. Frontier goals do not care which way the
+      # rover ends up facing.
+      yaw_goal_tolerance: 3.15
 
     FollowPath:
       plugin: "dwb_core::DWBLocalPlanner"
@@ -145,7 +150,9 @@ controller_server:
       short_circuit_trajectory_evaluation: true
       stateful: true
       critics:
-        - "RotateToGoal"
+        # RotateToGoal deliberately absent: it is what spins the rover on
+        # arrival. Combined with yaw_goal_tolerance 3.15 the rover keeps the
+        # heading it arrived with and starts the next leg from there.
         - "Oscillation"
         - "BaseObstacle"
         - "GoalAlign"
