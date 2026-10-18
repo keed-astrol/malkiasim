@@ -3,11 +3,12 @@
   <model name="gamefield">
     <static>true</static>
     <link name="link">
-      <pose>0.135886 6.443587 0.789877 0 0 0</pose>
-      <collision name="collision">
+      <pose>0 0 0 0 0 0</pose>
+      <collision name="floor_collision">
+        <max_contacts>1400</max_contacts>
         <geometry>
           <mesh>
-            <uri>model://gamefield_arena/meshes/Gamefield.stl</uri>
+            <uri>model://gamefield_arena/meshes/gamefield_floor.stl</uri>
             <scale>0.001 0.001 0.001</scale>
           </mesh>
         </geometry>
@@ -20,17 +21,40 @@
           </friction>
         </surface>
       </collision>
-      
-      <visual name="visual">
+      <collision name="walls_collision">
+        <max_contacts>1400</max_contacts>
         <geometry>
           <mesh>
-            <uri>model://gamefield_arena/meshes/Gamefield.stl</uri>
+            <uri>model://gamefield_arena/meshes/gamefield_walls.stl</uri>
+            <scale>0.001 0.001 0.001</scale>
+          </mesh>
+        </geometry>
+      </collision>
+
+      <visual name="floor_visual">
+        <geometry>
+          <mesh>
+            <uri>model://gamefield_arena/meshes/gamefield_floor.stl</uri>
             <scale>0.001 0.001 0.001</scale>
           </mesh>
         </geometry>
         <material>
-          <ambient>0.2 0.6 0.2 1</ambient>
-          <diffuse>0.2 0.6 0.2 1</diffuse>
+          <ambient>0 0 0 1</ambient>
+          <diffuse>0 0 0 1</diffuse>
+          <specular>0.05 0.05 0.05 1</specular>
+        </material>
+      </visual>
+
+      <visual name="walls_visual">
+        <geometry>
+          <mesh>
+            <uri>model://gamefield_arena/meshes/gamefield_walls.stl</uri>
+            <scale>0.001 0.001 0.001</scale>
+          </mesh>
+        </geometry>
+        <material>
+          <ambient>0.53 0.81 0.98 1</ambient>
+          <diffuse>0.53 0.81 0.98 1</diffuse>
           <specular>0.1 0.1 0.1 1</specular>
         </material>
       </visual>

@@ -1,0 +1,90 @@
+{
+  "units": "STL has no unit tag; values are in the file units (almost certainly millimetres: maze ~6030 x 3062 mm)",
+  "axes": "Right-handed, Z up. X = long side of maze, Y = short side, Z = vertical. Original orientation preserved, no rotation applied.",
+  "frame": "Maze-centered frame: origin at XY centre of maze outer bounds, floor at z=0 (applies to maze_clean.stl and all positions below). Original file frame was already centred, so shift is ~0.",
+  "applied_shift_from_original": [
+    -0.0,
+    -0.0,
+    -0.0
+  ],
+  "cylinder": {
+    "mesh": "cylinder.stl",
+    "mesh_origin": "centre of base (x,y at axis, z at bottom)",
+    "outer_radius": 150.0,
+    "inner_radius": 145.0,
+    "height": 500.0,
+    "axis": [
+      0,
+      0,
+      1
+    ],
+    "orientation_rpy_deg": [
+      0,
+      0,
+      0
+    ],
+    "note": "Thin-walled tube, rotationally symmetric about Z; yaw irrelevant.",
+    "instances": [
+      {
+        "name": "cylinder_1",
+        "position": [
+          1074.426,
+          1218.207,
+          0.523
+        ],
+        "orientation_rpy_deg": [
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "name": "cylinder_2",
+        "position": [
+          2080.075,
+          678.606,
+          0.523
+        ],
+        "orientation_rpy_deg": [
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "name": "cylinder_3",
+        "position": [
+          1085.832,
+          118.266,
+          0.523
+        ],
+        "orientation_rpy_deg": [
+          0,
+          0,
+          0
+        ]
+      }
+    ]
+  },
+  
+  "cross_structure": {
+    "mesh": "cross_structure.stl",
+    "mesh_origin": "XY centre of its bounding box, bottom at z=0",
+    "position": [
+      1555.971,
+      -1146.427,
+      0.0
+    ],
+    "orientation_rpy_deg": [
+      0,
+      0,
+      0
+    ],
+    "size_xyz": [
+      44.9,
+      560.21,
+      649.68
+    ],
+    "note": "Flat plate lying in the YZ plane (thickness ~45 along X): cross-shaped body with circular head on top. Includes a thin (0.1) ground sheet beneath it."
+  }
+}

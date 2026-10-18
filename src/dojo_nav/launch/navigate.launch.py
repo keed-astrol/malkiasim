@@ -1,27 +1,15 @@
-"""
-Launch RoboDojo autonomous navigation.
-
-Brings up:
-  - Gazebo + robot spawn (same as slam.launch.py)
-  - SLAM Toolbox (mapping -> saves map)
-  - Nav2 stack: AMCL, planner, controller, costmaps, BT navigator
-  - RViz with nav visualization config
-
-Usage:
-  ros2 launch dojo_nav navigate.launch.py
-
-The slam_toolbox map is used live. Once you have a good map from
-mapping mode, you can save it and switch to localization mode.
-"""
+"""Launch RoboDojo autonomous navigation using a saved map./home/keedastro/dojourdf/src/dojo_nav/launch/navigate.launch.py"""
 from pathlib import Path
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (
+        DeclareLaunchArgument,
     IncludeLaunchDescription,
     SetEnvironmentVariable,
     TimerAction,
 )
+from launch.substitutions import LaunchConfiguration
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
 
@@ -32,12 +20,12 @@ def generate_launch_description():
     pkg_dojo_nav = Path(get_package_share_directory('dojo_nav'))
     pkg_gz_sim = Path(get_package_share_directory('ros_gz_sim'))
 
-    world = pkg_gamefield / 'worlds' / 'gamefield.world'
+    world = pkg_gamefield / 'worlds' / 'auto_arena.world'
     robot_desc = pkg_robodojo / 'urdf' / 'robodojo.urdf'
-    slam_cfg = pkg_robodojo / 'config' / 'slam.yaml'
     ekf_cfg = pkg_robodojo / 'config' / 'ekf.yaml'
     nav2_cfg = pkg_dojo_nav / 'config' / 'nav2_params.yaml'
     rviz_cfg = pkg_dojo_nav / 'config' / 'dojo_nav.rviz'
+    default_map = Path('/home/keedastro/dojourdf/maps/arena.yaml')
 
     # ─── Gazebo + robot bringup (same as slam.launch.py) ───
     gz_sim = IncludeLaunchDescription(
@@ -78,7 +66,7 @@ def generate_launch_description():
             '-name', 'robodojo',
             '-topic', 'robot_description',
             '-x', '-2.7',
-            '-y', '1.2',
+            '-y', '-1.2',
             '-z', '0.6',
             '-Y', '0',
         ],
@@ -94,42 +82,107 @@ def generate_launch_description():
         output='screen',
     )
 
-    # ─── SLAM Toolbox ───
-    slam_lifecycle = Node(
-        package='nav2_lifecycle_manager',
-        executable='lifecycle_manager',
-        name='lifecycle_manager_slam',
-        parameters=[{
-            'use_sim_time': True,
-            'autostart': True,
-            'node_names': ['slam_toolbox'],
-        }],
-        output='screen',
-    )
-
-    slam_toolbox = Node(
-        package='slam_toolbox',
-        executable='async_slam_toolbox_node',
-        name='slam_toolbox',
-        parameters=[slam_cfg, {'use_sim_time': True}],
-        output='screen',
-    )
-
-    # ─── Nav2 stack ───
-    nav2_bringup = IncludeLaunchDescription(
+    # ─── Nav2 localization and navigation ───
+    localization = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             str(
                 Path(get_package_share_directory('nav2_bringup'))
                 / 'launch'
-                / 'navigation_launch.py'
+                / 'localization_launch.py'
             )
         ),
         launch_arguments={
+            'map': LaunchConfiguration('map'),
             'use_sim_time': 'true',
             'params_file': str(nav2_cfg),
             'autostart': 'true',
         }.items(),
     )
+
+    nav_remaps = [('/tf', 'tf'), ('/tf_static', 'tf_static')]
+    nav_params = [str(nav2_cfg), {'use_sim_time': True}]
+
+    nav_nodes = [
+        Node(
+            package='nav2_controller',
+            executable='controller_server',
+            output='screen',
+            parameters=nav_params,
+            remappings=nav_remaps + [('cmd_vel', 'cmd_vel_nav')],
+        ),
+        Node(
+            package='nav2_smoother',
+            executable='smoother_server',
+            output='screen',
+            parameters=nav_params,
+            remappings=nav_remaps,
+        ),
+        Node(
+            package='nav2_planner',
+            executable='planner_server',
+            output='screen',
+            parameters=nav_params,
+            remappings=nav_remaps,
+        ),
+        Node(
+            package='nav2_behaviors',
+            executable='behavior_server',
+            output='screen',
+            parameters=nav_params,
+            remappings=nav_remaps + [('cmd_vel', 'cmd_vel_nav')],
+        ),
+        Node(
+            package='nav2_bt_navigator',
+            executable='bt_navigator',
+            output='screen',
+            parameters=nav_params,
+            remappings=nav_remaps,
+        ),
+        Node(
+            package='nav2_waypoint_follower',
+            executable='waypoint_follower',
+            output='screen',
+            parameters=nav_params,
+            remappings=nav_remaps,
+        ),
+        Node(
+            package='nav2_velocity_smoother',
+            executable='velocity_smoother',
+            output='screen',
+            parameters=nav_params,
+            remappings=nav_remaps + [
+                ('cmd_vel', 'cmd_vel_nav'),
+                ('cmd_vel_smoothed', 'cmd_vel_smoothed'),
+            ],
+        ),
+        Node(
+            package='nav2_collision_monitor',
+            executable='collision_monitor',
+            output='screen',
+            parameters=nav_params,
+            remappings=nav_remaps,
+        ),
+        Node(
+            package='nav2_lifecycle_manager',
+            executable='lifecycle_manager',
+            name='lifecycle_manager_navigation',
+            output='screen',
+            parameters=[{
+                'use_sim_time': True,
+                'autostart': True,
+                'node_names': [
+                    'controller_server',
+                    'smoother_server',
+                    'planner_server',
+                    'behavior_server',
+                    'bt_navigator',
+                    'waypoint_follower',
+                    'velocity_smoother',
+                    'collision_monitor',
+                ],
+            }],
+        ),
+    ]
 
     # ─── RViz with nav config ───
     rviz = Node(
@@ -142,6 +195,11 @@ def generate_launch_description():
     )
 
     ld = LaunchDescription([
+        DeclareLaunchArgument(
+            'map',
+            default_value=str(default_map),
+            description='Full path to the Nav2 occupancy-grid YAML map.',
+        ),
         SetEnvironmentVariable(
             name='GZ_SIM_RESOURCE_PATH',
             value=f'{pkg_robodojo.parent}:{pkg_gamefield / "models"}',
@@ -151,12 +209,10 @@ def generate_launch_description():
         gz_bridge,
         spawn_robot,
         ekf,
-        slam_lifecycle,
-        slam_toolbox,
-        # Start Nav2 after a short delay so SLAM map is available
+        # Start localization and navigation after the simulator and robot TF exist.
         TimerAction(
             period=3.0,
-            actions=[nav2_bringup],
+            actions=[localization, *nav_nodes],
         ),
         rviz,
     ])

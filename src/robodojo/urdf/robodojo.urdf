@@ -87,7 +87,7 @@
     name="front_left_wheel_joint"
     type="continuous">
     <origin
-      xyz="0.065291 0.1215 -0.019796"
+      xyz="0.065 0.1215 -0.019796"
       rpy="0 0 0" />
     <parent
       link="base_link" />
@@ -139,7 +139,7 @@
     name="front_right_wheel_joint"
     type="continuous">
     <origin
-      xyz="0.064709 -0.1215 -0.019797"
+      xyz="0.065 -0.1215 -0.019796"
       rpy="0 0 0" />
     <parent
       link="base_link" />
@@ -191,7 +191,7 @@
     name="back_left_wheel_joint"
     type="continuous">
     <origin
-      xyz="-0.064709 0.1215 -0.019796"
+      xyz="-0.065 0.1215 -0.019796"
       rpy="0 0 0" />
     <parent
       link="base_link" />
@@ -243,7 +243,7 @@
     name="back_right_wheel_joint"
     type="continuous">
     <origin
-      xyz="-0.065291 -0.123 -0.019796"
+      xyz="-0.065 -0.1215 -0.019796"
       rpy="0 0 0" />
     <parent
       link="base_link" />
@@ -270,7 +270,7 @@
     </inertial>
     <visual>
       <origin
-        xyz="-0.042603 -0.099966 -0.033562"
+        xyz="-0.042603 -0.042603 -0.033562"
         rpy="0 0 1.5708" />
       <geometry>
         <mesh
@@ -285,8 +285,8 @@
     </visual>
     <collision>
       <origin
-        xyz="-0.042603 0.099966 -0.033562"
-        rpy="0 0 0" />
+        xyz="-0.042603 -0.042603 -0.033562"
+        rpy="0 0 1.5708" />
       <geometry>
         <mesh
           filename="package://robodojo/meshes/lidar.stl"
@@ -325,7 +325,7 @@
           scale="0.001 0.001 0.001" />
       </geometry>
       <material name="imu_material">
-        <color rgba="128 0.8 0.8 1" />
+        <color rgba="0.5 0.8 0.8 1" />
       </material>
     </visual>
     <collision>
@@ -363,7 +363,7 @@
     <max_angular_acceleration>1.0</max_angular_acceleration>
     <max_angular_velocity>1.0</max_angular_velocity>
     <child_frame_id>base_footprint</child_frame_id>
-    <odom_publish_frequency>30</odom_publish_frequency>
+    <odom_publish_frequency>100</odom_publish_frequency>
     <tf_topic>/tf_raw</tf_topic>   <!-- never bridged, so the EKF owns odom TF -->
   </plugin>
   <plugin filename="gz-sim-joint-state-publisher-system"
@@ -387,7 +387,7 @@
       type="gpu_lidar">
       <topic>/scan</topic>
       <gz_frame_id>lidar_link</gz_frame_id>
-      <update_rate>10</update_rate>
+      <update_rate>100</update_rate>
       <ray>
         <scan>
           <horizontal>
