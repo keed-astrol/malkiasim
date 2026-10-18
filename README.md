@@ -9,6 +9,16 @@ Target platform: **ROS 2 Jazzy** + **Gazebo Harmonic** (`ros_gz`), on Ubuntu 24.
 If you run ROS 2 inside a container (e.g. `distrobox`), run every `ros2`/`gz`
 command **inside that container**, not on the host.
 
+> **Branch status.** This branch fixes the whole bring-up → navigation → SLAM
+> chain and adds autonomous frontier exploration plus the mission API. See
+> [`CHANGELOG.md`](CHANGELOG.md) for the full list, the measurements it was
+> verified against, and the notes for moving it to the real robot.
+>
+> **Known open issue:** the 5 cm plateaus are invisible to the 0.198 m-high 2D
+> lidar, so they appear as free space in every map and a mission can stall on
+> their edges (a low cliff sensor, bump marking, or stamping the outlines from
+> the arena mesh are the options — see CHANGELOG §9).
+
 ---
 
 ## Packages
