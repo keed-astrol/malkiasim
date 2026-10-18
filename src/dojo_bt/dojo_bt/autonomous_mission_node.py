@@ -338,6 +338,10 @@ class AutonomousMissionNode(Node):
         self.get_logger().info(f'Mission command: {action}')
 
         if action == 'CANCEL':
+            # Cancel the Nav2 action too: clearing our state alone left the
+            # navigator driving to the old goal (the rover kept going after a
+            # CANCEL).
+            self._drop_nav_goal()
             self.sm.cancel_mission()
 
         elif action == 'EXPLORE':
