@@ -326,8 +326,13 @@ def generate_launch_description():
         spawn_robot,
         ekf,
         # Start localization, navigation, and autonomous mission after simulator TF exists
+        # 10 s: at real_time_factor 0.6 the sim clock advances slower than wall
+        # time, and starting the Nav2 lifecycle bringup while Gazebo/SLAM are
+        # still settling can leave planner_server stuck in `configure` (the
+        # manager then blocks and bt_navigator never activates, so every goal is
+        # silently swallowed).
         TimerAction(
-            period=3.0,
+            period=10.0,
             actions=[localization, *slam_localization, *nav_nodes, autonomous_mission],
         ),
         rviz,
