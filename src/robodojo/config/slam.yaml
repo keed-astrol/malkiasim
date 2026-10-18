@@ -46,7 +46,7 @@ slam_toolbox:
     # the odom -> lidar_link transform for their stamp exists. The defaults
     # (scan_queue_size 1, transform_timeout 0.2) are too tight when the EKF is
     # still catching up with a 15 Hz scan stream, so give the filter some slack.
-    scan_queue_size: 5
+    scan_queue_size: 20
     transform_timeout: 0.5
     tf_buffer_duration: 30.0
     stack_size_to_use: 40000000
@@ -67,8 +67,12 @@ slam_toolbox:
     link_match_minimum_response_fine: 0.1
     link_scan_maximum_distance: 1.5
 
-    # Loop closure
-    do_loop_closing: true
+    # Loop closure: OFF. The arena is 6 x 3 m and a session is a few minutes, so
+    # there is nothing to close; a single false closure searches an 8 m space
+    # and *rotates the whole map* (observed: the saved map came out tilted with
+    # duplicated walls). Without it the pose drifts slowly but stays locally
+    # consistent, which is what the planner and costmap need.
+    do_loop_closing: false
     loop_search_maximum_distance: 3.0
     loop_match_minimum_chain_size: 10
     loop_match_maximum_variance_coarse: 3.0
