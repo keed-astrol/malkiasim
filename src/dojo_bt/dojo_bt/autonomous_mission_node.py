@@ -31,7 +31,9 @@ from geometry_msgs.msg import PoseStamped, Twist
 from nav_msgs.msg import Odometry, OccupancyGrid
 from sensor_msgs.msg import LaserScan, Imu
 from nav2_msgs.action import NavigateToPose, NavigateThroughPoses
+from action_msgs.msg import GoalStatus
 from std_msgs.msg import String
+from rclpy.qos import QoSProfile, DurabilityPolicy
 from tf2_ros import Buffer, TransformListener
 
 from dojo_bt.mission_state_machine import (
@@ -51,7 +53,8 @@ class AutonomousMissionNode(Node):
       /cmd_vel_emergency      (Twist)     - emergency stop override
 
     Subscribers:
-      /scan                   (LaserScan) - LIDAR for collision/frontiers
+      /scan                   (LaserScan) - LIDAR for collision risk
+      /map                    (OccupancyGrid) - frontier source for EXPLORE
       /odom                   (Odometry)  - wheel odometry for stuck detection
       /imu                    (Imu)       - orientation + angular velocity
       /dojo_mission           (String)    - mission commands as JSON
@@ -59,11 +62,25 @@ class AutonomousMissionNode(Node):
     Action Clients:
       /navigate_to_pose       (NavigateToPose)
       /navigate_through_poses (NavigateThroughPoses)
+
+    EXPLORE missions pick frontier goals (known-free cells on the border of
+    unknown space) from /map, drive to the best one and repeat. That map can
+    come from a prebuilt map + AMCL or from slam_toolbox building it live
+    (launch with localization:=slam).
     """
 
     COLLISION_MIN_RANGE = 0.25       # meters
     COLLISION_WARN_RANGE = 0.50      # meters
     COLLISION_CLEAR_RANGE = 0.40     # meters: hysteresis to exit EMERGENCY
+
+    # Frontier exploration (EXPLORE)
+    FRONTIER_MIN_CELLS = 4           # ignore frontier specks
+    FRONTIER_MIN_GOAL_DIST = 0.40    # m: don't chase something under the robot
+    FRONTIER_MAX_GOAL_DIST = 15.0    # m: sanity cap
+    FRONTIER_CLEARANCE = 0.20        # m: free space required around the goal cell
+    FRONTIER_BLACKLIST_TIME = 90.0   # s: forget a failed frontier after this
+    FRONTIER_RETRY_PERIOD = 1.0      # s: minimum gap between frontier selections
+    FRONTIER_EMPTY_ATTEMPTS = 3      # consecutive empty scans before giving up
 
     # Collision checks only look at the cone the robot is travelling into. The
     # lidar is a 360 deg unit, so using the global minimum range would flag the
@@ -80,6 +97,11 @@ class AutonomousMissionNode(Node):
     EMERGENCY_ESCAPE_TIME = 1.7      # seconds of reverse/spin per cycle
     EMERGENCY_REVERSE_SPEED = 0.10   # m/s
     EMERGENCY_SPIN_SPEED = 0.60      # rad/s
+
+    # Stuck recovery: this node only bookkeeps. The tree's MissionStuck branch
+    # owns the actual back-up/spin so two systems never fight over the wheels.
+    RECOVERY_GRACE = 3.0             # seconds to let Nav2's own recovery run
+    RECOVERY_SETTLE = 1.0            # seconds after clearing the costmaps
 
     def __init__(self):
         super().__init__('autonomous_mission_node')
@@ -112,6 +134,23 @@ class AutonomousMissionNode(Node):
             Odometry, '/odometry/filtered',
             self._on_filtered_odom, 10,
             callback_group=self._sensor_cb)
+
+        # /map is latched by map_server and slam_toolbox, so use transient_local
+        # to get the last map immediately instead of waiting for an update.
+        map_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self._map_sub = self.create_subscription(
+            OccupancyGrid, '/map',
+            self._on_map, map_qos,
+            callback_group=self._sensor_cb)
+
+        # ─── Frontier exploration state ──────────────────────
+        self._latest_map: Optional[OccupancyGrid] = None
+        self._goal_in_flight = False
+        self._frontier_count = 0
+        self._frontier_empties = 0
+        self._last_frontier_attempt = self.get_clock().now()
+        self._frontier_blacklist = {}   # (ix, iy) -> expiry (sim seconds)
+        self._current_frontier = None
 
         # ─── Subscribers (command input) ─────────────────────
         self._cmd_sub = self.create_subscription(
@@ -151,7 +190,6 @@ class AutonomousMissionNode(Node):
         # ─── Recovery timer-based sequencing ─────────────────
         self._recovery_phase_start = self.get_clock().now()
         self._recovery_phase = -1   # -1 = not active
-        self._recovery_twist = Twist()
         self._recovery_sent = False
 
         # ─── Emergency (collision stop/escape) sequencing ────
@@ -250,6 +288,9 @@ class AutonomousMissionNode(Node):
             self.sm.cancel_mission()
 
         elif action == 'EXPLORE':
+            self._frontier_empties = 0
+            self._goal_in_flight = False
+            self._current_frontier = None
             self.sm.start_mission(MissionType.EXPLORE)
 
         elif action == 'GOAL':
@@ -310,6 +351,13 @@ class AutonomousMissionNode(Node):
         if self.sm.mission_active and self._current_pose is not None:
             self.sm.evaluate_stuck(self._current_pose)
 
+        # ── EXPLORE: dispatch the next frontier goal ──
+        if (self.sm.mission_active
+                and self.sm.mission_type == MissionType.EXPLORE
+                and self.sm.state == MissionState.EXPLORING
+                and not self._goal_in_flight):
+            self._dispatch_explore_goal()
+
         # ── Recovery timer-based actions ──
         if self.sm.state == MissionState.RECOVERING:
             self._handle_recovery()
@@ -344,10 +392,14 @@ class AutonomousMissionNode(Node):
 
     def _handle_recovery(self):
         """
-        Timer-driven recovery sequence (non-blocking):
-          Phase 0: Back up gently for 1.5s (publish negative x velocity)
-          Phase 1: Spin in place for 2.5s (publish angular z velocity)
-          Phase 2: Stop, clear costmaps (call clear services), mark recovery done
+        Recovery bookkeeping (non-blocking). Deliberately commands no velocity.
+
+        The behaviour tree's MissionStuck branch (BackUp + Spin) already moves
+        the robot through Nav2's behaviour server, which halts the controller
+        first. If this node also published on /cmd_vel_emergency, twist_mux
+        priority 100 would make it outrank the controller and the two would
+        fight - which is what produced the endless circling at doorways. So all
+        we do here is give Nav2 a moment, clear the costmaps and hand back.
         """
         now = self.get_clock().now()
 
@@ -355,43 +407,21 @@ class AutonomousMissionNode(Node):
             self._recovery_phase = 0
             self._recovery_phase_start = now
             self._recovery_sent = False
-            self.get_logger().info(f'Recovery phase 0: backing up (attempt {self.sm.ctx.recovery_attempts + 1})')
+            self.get_logger().info(
+                f'Recovery started (attempt {self.sm.ctx.recovery_attempts + 1}); '
+                'letting Nav2 own the motion')
 
         phase_elapsed = (now - self._recovery_phase_start).nanoseconds * 1e-9
 
         if self._recovery_phase == 0:
-            # Backup: publish negative x for ~1.5s
-            if phase_elapsed < 1.5:
-                twist = Twist()
-                twist.linear.x = -0.12
-                self._cmd_vel_pub.publish(twist)
-            else:
-                # Stop and advance
-                self._cmd_vel_pub.publish(Twist())
+            if phase_elapsed >= self.RECOVERY_GRACE:
+                if not self._recovery_sent:
+                    self._recovery_sent = True
+                    self._clear_costmaps()
                 self._recovery_phase = 1
                 self._recovery_phase_start = now
-                self.get_logger().info('Recovery phase 1: spinning')
-
         elif self._recovery_phase == 1:
-            # Spin: publish angular z for ~2.5s
-            if phase_elapsed < 2.5:
-                twist = Twist()
-                twist.angular.z = 0.6
-                self._cmd_vel_pub.publish(twist)
-            else:
-                # Stop
-                self._cmd_vel_pub.publish(Twist())
-                self._recovery_phase = 2
-                self._recovery_phase_start = now
-                self.get_logger().info('Recovery phase 2: clearing costmaps')
-
-        elif self._recovery_phase == 2:
-            self._cmd_vel_pub.publish(Twist())
-            if not self._recovery_sent:
-                self._recovery_sent = True
-                # Try to call clear costmap services
-                self._clear_costmaps()
-            if phase_elapsed > 1.0:
+            if phase_elapsed >= self.RECOVERY_SETTLE:
                 self.sm.recovery_complete()
                 self._recovery_phase = -1
                 self._recovery_sent = False
@@ -411,12 +441,212 @@ class AutonomousMissionNode(Node):
         if global_srv.wait_for_service(timeout_sec=0.5):
             global_srv.call_async(ClearEntireCostmap.Request())
 
+    # ─── Frontier exploration (EXPLORE missions) ─────────────
+
+    def _on_map(self, msg: OccupancyGrid):
+        self._latest_map = msg
+
+    def _frontier_key(self, grid: OccupancyGrid, ix: int, iy: int):
+        """Coarse key so a frontier that failed once is not retried immediately."""
+        res = grid.info.resolution
+        return (int(ix * res / 0.25), int(iy * res / 0.25))
+
+    def _pick_frontier(self) -> Optional[PoseStamped]:
+        """
+        Pick the best frontier goal from the latest /map.
+
+        A frontier is a known-free cell touching unknown space. Clusters are
+        scored by size / (1 + distance) so big, nearby openings win. The goal is
+        moved a little way back into known free space so it is reachable (the
+        planner must not be handed a cell sitting in a wall).
+        """
+        grid = self._latest_map
+        if grid is None or grid.info.resolution <= 0.0:
+            return None
+        w, h = int(grid.info.width), int(grid.info.height)
+        data = grid.data
+        if w <= 0 or h <= 0 or len(data) != w * h:
+            return None
+        res = float(grid.info.resolution)
+        ox = grid.info.origin.position.x
+        oy = grid.info.origin.position.y
+        now = self.get_clock().now().nanoseconds * 1e-9
+
+        # Seeds: free cells with an unknown 8-neighbour. Scanning unknown cells
+        # (usually a minority) is much cheaper than scanning the whole grid.
+        seeds = set()
+        for i in range(w * h):
+            if data[i] >= 0:
+                continue
+            x = i % w
+            y = i // w
+            for dy in (-1, 0, 1):
+                ny = y + dy
+                if ny < 0 or ny >= h:
+                    continue
+                for dx in (-1, 0, 1):
+                    nx = x + dx
+                    if nx < 0 or nx >= w:
+                        continue
+                    j = ny * w + nx
+                    if data[j] == 0:
+                        seeds.add(j)
+
+        # Cluster adjacent frontier cells.
+        clusters = []
+        remaining = seeds
+        while remaining:
+            start = remaining.pop()
+            comp = [start]
+            stack = [start]
+            while stack:
+                cur = stack.pop()
+                cx = cur % w
+                cy = cur // w
+                for dy in (-1, 0, 1):
+                    ny = cy + dy
+                    if ny < 0 or ny >= h:
+                        continue
+                    for dx in (-1, 0, 1):
+                        nx = cx + dx
+                        if nx < 0 or nx >= w:
+                            continue
+                        j = ny * w + nx
+                        if j in remaining:
+                            remaining.discard(j)
+                            comp.append(j)
+                            stack.append(j)
+            if len(comp) >= self.FRONTIER_MIN_CELLS:
+                clusters.append(comp)
+
+        self._frontier_count = len(clusters)
+        if not clusters:
+            return None
+
+        robot = self._current_pose
+        best = None
+        best_score = -1.0
+        clear_cells = max(1, int(self.FRONTIER_CLEARANCE / res))
+
+        for comp in clusters:
+            csx = sum(c % w for c in comp) / len(comp)
+            csy = sum(c // w for c in comp) / len(comp)
+            # Representative cell: nearest cluster cell to the centroid that
+            # has FRONTIER_CLEARANCE of room to manoeuvre, i.e. no occupied
+            # cells nearby. Unknown cells in the window are fine - by definition
+            # a frontier sits next to them.
+            cand = None
+            cand_d = None
+            for c in comp:
+                cx = c % w
+                cy = c // w
+                d = (cx - csx) ** 2 + (cy - csy) ** 2
+                if cand_d is not None and d >= cand_d:
+                    continue
+                safe = True
+                for dy in range(-clear_cells, clear_cells + 1):
+                    ny = cy + dy
+                    if ny < 0 or ny >= h:
+                        continue
+                    row = ny * w
+                    for dx in range(-clear_cells, clear_cells + 1):
+                        nx = cx + dx
+                        if nx < 0 or nx >= w:
+                            continue
+                        if data[row + nx] > 0:    # occupied / lethal
+                            safe = False
+                            break
+                    if not safe:
+                        break
+                if safe:
+                    cand, cand_d = c, d
+            if cand is None:
+                continue   # cluster is too tight to be a sane goal
+
+            wx = ox + (cand % w + 0.5) * res
+            wy = oy + (cand // w + 0.5) * res
+            key = self._frontier_key(grid, cand % w, cand // w)
+            expiry = self._frontier_blacklist.get(key)
+            if expiry is not None and expiry > now:
+                continue
+
+            if robot is not None:
+                rx = robot.pose.position.x
+                ry = robot.pose.position.y
+            else:
+                rx, ry = wx, wy
+            dist = math.hypot(wx - rx, wy - ry)
+            if dist < self.FRONTIER_MIN_GOAL_DIST or dist > self.FRONTIER_MAX_GOAL_DIST:
+                continue
+
+            score = len(comp) / (1.0 + dist)
+            if score > best_score:
+                best_score = score
+                best = (wx, wy, key)
+
+        if best is None:
+            return None
+
+        wx, wy, key = best
+        self._current_frontier = key
+
+        pose = PoseStamped()
+        pose.header.frame_id = grid.header.frame_id or 'map'
+        pose.header.stamp = self.get_clock().now().to_msg()
+        pose.pose.position.x = float(wx)
+        pose.pose.position.y = float(wy)
+        if robot is not None:
+            yaw = math.atan2(wy - robot.pose.position.y, wx - robot.pose.position.x)
+        else:
+            yaw = 0.0
+        pose.pose.orientation.z = math.sin(yaw / 2.0)
+        pose.pose.orientation.w = math.cos(yaw / 2.0)
+        return pose
+
+    def _dispatch_explore_goal(self):
+        """Send the next frontier goal, or finish the EXPLORE mission."""
+        now = self.get_clock().now().nanoseconds * 1e-9
+        if now - self._last_frontier_attempt < self.FRONTIER_RETRY_PERIOD:
+            return
+        self._last_frontier_attempt = now
+
+        if self._latest_map is None:
+            self.get_logger().info('EXPLORE: waiting for /map ...')
+            return
+
+        goal = self._pick_frontier()
+        if goal is None:
+            self._frontier_empties += 1
+            self.get_logger().info(
+                f'EXPLORE: no frontier found ({self._frontier_empties}/'
+                f'{self.FRONTIER_EMPTY_ATTEMPTS})')
+            if self._frontier_empties >= self.FRONTIER_EMPTY_ATTEMPTS:
+                self.get_logger().info('EXPLORE: map fully explored')
+                self.sm.complete_current_mission_step()
+            return
+
+        self._frontier_empties = 0
+        self._goal_in_flight = True
+        self.get_logger().info(
+            f'EXPLORE: heading to frontier ({goal.pose.position.x:.2f}, '
+            f'{goal.pose.position.y:.2f}) of {self._frontier_count}')
+        self._send_nav_goal(goal)
+
+    def _blacklist_frontier(self):
+        if self._current_frontier is None:
+            return
+        now = self.get_clock().now().nanoseconds * 1e-9
+        self._frontier_blacklist[self._current_frontier] = (
+            now + self.FRONTIER_BLACKLIST_TIME)
+        self._current_frontier = None
+
     # ─── Nav2 action calls ───────────────────────────────────
 
     def _send_nav_goal(self, pose: PoseStamped):
         """Send a single-pose goal to Nav2 NavigateToPose action server."""
         if not self._nav_client.wait_for_server(timeout_sec=1.0):
             self.get_logger().error('NavigateToPose action server not available')
+            self._goal_in_flight = False
             return
 
         goal = NavigateToPose.Goal()
@@ -428,7 +658,9 @@ class AutonomousMissionNode(Node):
             f'{pose.pose.position.y:.2f})')
 
         future = self._nav_client.send_goal_async(goal)
-        future.add_done_callback(self._on_nav_result)
+        # send_goal_async resolves when the goal is accepted, NOT when it
+        # finishes; the result future has to be chained separately.
+        future.add_done_callback(self._on_nav_goal_response)
 
     def _send_waypoint_goal(self, poses: List[PoseStamped]):
         """Send a multi-pose goal to Nav2 NavigateThroughPoses action."""
@@ -443,29 +675,80 @@ class AutonomousMissionNode(Node):
         self.get_logger().info(f'Sending Nav2 waypoint goal: {len(poses)} poses')
 
         future = self._wp_client.send_goal_async(goal)
-        future.add_done_callback(self._on_wp_result)
+        future.add_done_callback(self._on_wp_goal_response)
+
+    def _on_nav_goal_response(self, future):
+        """Fires when bt_navigator accepts (or rejects) the goal."""
+        try:
+            handle = future.result()
+        except Exception as e:
+            self.get_logger().error(f'Navigation goal request failed: {e}')
+            self._goal_in_flight = False
+            return
+
+        if not handle.accepted:
+            self.get_logger().warn('Navigation goal rejected')
+            self._goal_in_flight = False
+            self._on_goal_failed('rejected')
+            return
+
+        handle.get_result_async().add_done_callback(self._on_nav_result)
 
     def _on_nav_result(self, future):
+        """Fires when the accepted goal actually finishes."""
         try:
-            result = future.result()
-            if result.valid and result.status == 4:
-                self.get_logger().info('Navigation goal reached')
-                self.sm.complete_current_mission_step()
-            else:
-                self.get_logger().warn(f'Navigation failed: status={result.status}')
+            status = future.result().status
         except Exception as e:
-            self.get_logger().error(f'Navigation action failed: {e}')
+            self.get_logger().error(f'Navigation result failed: {e}')
+            self._goal_in_flight = False
+            return
+
+        self._goal_in_flight = False
+        if status == GoalStatus.STATUS_SUCCEEDED:
+            self.get_logger().info('Navigation goal reached')
+            if self.sm.mission_type == MissionType.EXPLORE:
+                # Keep exploring: the next frontier comes from the updated map.
+                self._current_frontier = None
+            else:
+                self.sm.complete_current_mission_step()
+        else:
+            self.get_logger().warn(f'Navigation failed: status={status}')
+            self._on_goal_failed(f'status={status}')
+
+    def _on_goal_failed(self, reason: str):
+        """A goal did not complete: keep exploring, or end the mission."""
+        if self.sm.mission_type == MissionType.EXPLORE and self.sm.mission_active:
+            self.get_logger().warn(f'EXPLORE: frontier unreachable ({reason}); trying another')
+            self._blacklist_frontier()
+        elif self.sm.mission_active:
+            self.get_logger().warn(f'Mission goal failed ({reason}); cancelling mission')
+            self.sm.cancel_mission()
+
+    def _on_wp_goal_response(self, future):
+        """Fires when bt_navigator accepts the waypoint goal."""
+        try:
+            handle = future.result()
+        except Exception as e:
+            self.get_logger().error(f'Waypoint goal request failed: {e}')
+            return
+        if not handle.accepted:
+            self.get_logger().warn('Waypoint goal rejected')
+            self._on_goal_failed('rejected')
+            return
+        handle.get_result_async().add_done_callback(self._on_wp_result)
 
     def _on_wp_result(self, future):
         try:
-            result = future.result()
-            if result.valid and result.status == 4:
-                self.get_logger().info('Waypoint run complete')
-                self.sm.complete_current_mission_step()
-            else:
-                self.get_logger().warn(f'Waypoint run failed: status={result.status}')
+            status = future.result().status
         except Exception as e:
-            self.get_logger().error(f'Waypoint action failed: {e}')
+            self.get_logger().error(f'Waypoint result failed: {e}')
+            return
+        if status == GoalStatus.STATUS_SUCCEEDED:
+            self.get_logger().info('Waypoint run complete')
+            self.sm.complete_current_mission_step()
+        else:
+            self.get_logger().warn(f'Waypoint run failed: status={status}')
+            self._on_goal_failed(f'status={status}')
 
     # ─── Status publishing (1 Hz) ────────────────────────────
 
@@ -480,6 +763,8 @@ class AutonomousMissionNode(Node):
         summary['min_scan_range_all'] = self._round_range(self._min_scan_range_all)
         summary['min_scan_range_rear'] = self._round_range(self._min_scan_range_rear)
         summary['current_yaw'] = round(self._current_yaw, 3)
+        summary['frontiers'] = self._frontier_count
+        summary['goal_in_flight'] = self._goal_in_flight
         if self._current_pose:
             summary['pose_x'] = round(self._current_pose.pose.position.x, 3)
             summary['pose_y'] = round(self._current_pose.pose.position.y, 3)

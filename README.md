@@ -66,7 +66,7 @@ Source `install/setup.bash` in every new terminal before launching anything.
 | `ros2 launch robodojo gz_sim.launch.py` | Gazebo gamefield + robot + bridge + RViz |
 | `ros2 launch robodojo slam.launch.py` | Gazebo + EKF + SLAM Toolbox (builds `/map`) |
 | `ros2 launch dojo_nav navigate.launch.py` | Gazebo + EKF + full Nav2 stack + RViz, using a saved map |
-| `ros2 launch dojo_bt autonomous_maze.launch.py` | Everything above **plus** the custom BT and the autonomous mission node |
+| `ros2 launch dojo_bt autonomous_maze.launch.py` | Everything above **plus** the custom BT and the autonomous mission node (`localization:=slam` to map live instead of using the saved map) |
 | `ros2 launch gamefield world_rviz.launch.py` | World inspection in RViz |
 
 The robot spawns at approximately `x = -2.7`, `y = -1.2`, `z = 0.6`, yaw `0`.
@@ -132,6 +132,26 @@ you can override it:
 ros2 launch dojo_bt autonomous_maze.launch.py map:=/absolute/path/to/my_map.yaml
 ```
 
+### Localisation modes
+
+`autonomous_maze.launch.py` takes a `localization` argument that picks how `/map`
+is produced:
+
+| Value | What runs | Use when |
+|---|---|---|
+| `amcl` (default) | `map_server` + AMCL against the `map` argument | You already have a good map |
+| `slam` | `slam_toolbox` (`async_slam_toolbox_node`) builds `/map` live | Unknown arena, or you want `EXPLORE` to map it |
+
+```bash
+# Explore an unknown arena: build the map and drive frontier goals, no map file
+ros2 launch dojo_bt autonomous_maze.launch.py localization:=slam
+```
+
+SLAM mode uses `src/robodojo/config/slam.yaml` and is managed by
+`lifecycle_manager_slam`; `map_server`/AMCL are not started. Note that a map
+built live has no prior information — the robot only trusts what the lidar has
+seen, so expect it to make a few detours before the frontier goals settle down.
+
 ---
 
 ## Autonomous maze navigation
@@ -150,7 +170,7 @@ Missions are JSON on `/dojo_mission` (a `std_msgs/String`). Supported actions:
 
 | Action | Payload | Meaning |
 |---|---|---|
-| `EXPLORE` | – | Frontier-based exploration |
+| `EXPLORE` | – | Frontier-based exploration (see below) |
 | `GOAL` | `pose: {x, y [, z, qz, qw, frame_id]}` | Navigate to one pose |
 | `WAYPOINTS` | `poses: [{x, y, …}, …]` | Follow a sequence of poses |
 | `DOCK` | `dock_pose: {x, y, …}` | Return to the dock pose |
@@ -171,6 +191,26 @@ ros2 topic pub --once /dojo_mission std_msgs/msg/String \
   'data: "{\"action\": \"CANCEL\"}"'
 ```
 
+### What `EXPLORE` does
+
+`EXPLORE` is real frontier exploration, driven by the `/map` the node subscribes
+to (from `map_server` in `amcl` mode, or `slam_toolbox` in `slam` mode):
+
+1. A **frontier** is a known-free cell that touches unknown space. Adjacent
+   frontier cells are clustered (specks under 4 cells are dropped).
+2. Each cluster is scored `size / (1 + distance)`; the representative goal cell
+   is the one nearest the cluster centroid that has `FRONTIER_CLEARANCE` (0.20 m)
+   of clear space, so goals are never handed to the planner inside a wall.
+3. The goal is sent to `navigate_to_pose`, the next frontier is picked once it is
+   reached, and so on until no frontier survives (`FRONTIER_EMPTY_ATTEMPTS`
+   consecutive empty scans), at which point the mission completes.
+4. A frontier that fails or is rejected is **blacklisted** for 90 s and the
+   mission continues with the next one, instead of giving up.
+
+Note that a *static, fully explored* map has no frontiers at all — with the
+shipped `maps/arena.yaml` an `EXPLORE` command finishes almost immediately. Use
+`localization:=slam` (or a map with unexplored regions) for it to do anything.
+
 ### Monitoring
 
 ```bash
@@ -179,8 +219,10 @@ ros2 topic echo /dojo_mission/state    # JSON state machine snapshot
 ```
 
 `/dojo_mission/state` is published at 1 Hz and contains `state`, `mission_type`,
-`mission_active`, `is_stuck`, `min_scan_range`, `pose_x`, `pose_y`, … The
-Behavior Tree reads this topic for its collision/stuck decisions.
+`mission_active`, `is_stuck`, `min_scan_range`, `min_scan_range_all`,
+`min_scan_range_rear`, `frontiers`, `goal_in_flight`, `pose_x`, `pose_y`,
+`current_yaw`. The Behavior Tree reads this topic for its collision/stuck
+decisions.
 
 ---
 
@@ -199,11 +241,9 @@ controller_server ──► cmd_vel_nav
 ```
 
 `twist_mux` arbitrates so an emergency command always beats navigation commands.
-`/cmd_vel_emergency` has a **single writer**, `autonomous_mission_node`:
-
-* zero velocity during the hard-stop phase of a collision emergency, and
-* its timed reverse/spin escape manoeuvre, and
-* its timed back-up/spin recovery manoeuvres.
+`/cmd_vel_emergency` has a **single writer**, `autonomous_mission_node`, and it
+publishes on it for one reason only: the hard-stop phase of a collision
+emergency and its timed reverse/spin escape manoeuvre.
 
 Keeping one writer matters: `twist_mux` passes the newest message on the
 highest-priority input, so a second publisher on the same topic would fight the
@@ -211,6 +251,14 @@ mission node's escape (a fast zero-publisher would simply out-vote it). The
 `dojo_bt` `EmergencyStop` node is still registered for use in other trees, but
 the shipped tree deliberately does **not** publish zeros — it withholds
 controller commands via `IsCollisionImminent` and lets the mission node arbitrate.
+
+**Stuck recovery is owned by the tree, not by this node.** The `MissionStuck`
+branch of the BT runs `BackUp + Spin` through Nav2's behaviour server, which
+halts the controller first — one system at a time. An earlier revision had the
+mission node publish its own back-up/spin on `/cmd_vel_emergency` as well; that
+outranked the controller, so every attempt to pivot into a doorway was
+countermanded and the robot circled. `_handle_recovery` now only waits, clears
+the costmaps and hands control back.
 
 Config: `src/dojo_nav/config/twist_mux.yaml`.
 
@@ -291,9 +339,10 @@ ros2 topic pub --once /cmd_vel_emergency geometry_msgs/msg/Twist \
 | `src/dojo_bt/behavior_trees/maze/autonomous_maze.xml` | The Behavior Tree |
 | `src/dojo_bt/src/bt_conditions.cpp` | Custom BT conditions |
 | `src/dojo_bt/src/bt_actions.cpp` | Custom BT actions |
-| `src/dojo_bt/dojo_bt/autonomous_mission_node.py` | ROS interface / action clients |
+| `src/dojo_bt/dojo_bt/autonomous_mission_node.py` | ROS interface / action clients / frontier exploration |
 | `src/dojo_bt/dojo_bt/mission_state_machine.py` | State machine logic |
 | `src/robodojo/urdf/robodojo.urdf` | Robot description |
+| `src/robodojo/config/slam.yaml` | `slam_toolbox` mapping config |
 | `maps/arena.yaml` | Default Nav2 map |
 
 ---
@@ -343,6 +392,30 @@ rear-cone minima are still published as `min_scan_range_all` /
 stop the robot reverses (or spins in place when the rear is also blocked) until
 the way ahead is clear.
 
+**The robot circles in place and won't enter a doorway** — this is a
+recovery/authority problem rather than a planning one, and there are three
+places to look:
+
+* `ros2 topic echo /dojo_mission/state --once` — an `is_stuck: true` while the
+  robot is pivoting means something is treating rotation as a failure. The stuck
+  check counts **translation or rotation** as progress (12 s / 0.08 m / 0.35 rad)
+  precisely so that lining up with a corridor is not mistaken for being stuck.
+* The `MissionStuck` branch must be the only thing that moves the robot during
+  recovery. If the mission node is also publishing on `/cmd_vel_emergency`, the
+  priority-100 mux input wins and the controller is overridden.
+* `collision_monitor`'s approach polygon projects the footprint ahead by
+  `time_before_collision`; the default 1.2 s is ~0.31 m of look-ahead at full
+  speed, which registers a ~0.5 m doorway as a collision and stops the robot
+  exactly where it needs to commit. It is set to 0.5 s here.
+
+Wall keep-off is a compromise: the hard keep-out is the footprint's **inscribed
+radius** (0.138 m), which no parameter can reduce. `inflation_radius` (0.22 m)
+and `cost_scaling_factor` (8.0) only shape the *preference* for the corridor
+centre — a steep falloff and a tight radius make the robot willing to squeeze
+past walls, they do not let it clip them. If a passage is genuinely narrower
+than the robot (< ~0.30 m), no parameter change will fix it; the honest fixes
+are a smaller rover or a wider map.
+
 **Clean rebuild**
 
 ```bash
@@ -378,3 +451,20 @@ source install/setup.bash
 * Node parameters that targeted non-existent nodes were removed, and
   `dojo_bt`/`dojo_nav` `package.xml` files now declare the packages their launch
   files actually use.
+* Turning is much tighter: DWB `max_vel_theta` 2.0 rad/s with ±4.0 rad/s²
+  limits, matching limits in the velocity smoother, behaviour server and the
+  Gazebo diff-drive plugin. The robot also plans with its **measured footprint**
+  (`0.276 × 0.286 m`) rather than a circumscribed `robot_radius`, so it no longer
+  keeps a phantom 0.18 m of clearance on every side.
+* `EXPLORE` was a stub and `complete_current_mission_step()` never fired: the
+  mission node attached its result callback to `send_goal_async`, which resolves
+  when the goal is *accepted*, not when it finishes. Goals now chain through
+  `_on_nav_goal_response` → `get_result_async()` → `_on_nav_result`, and missions
+  actually complete.
+* `EXPLORE` now does frontier exploration over `/map`, and
+  `autonomous_maze.launch.py` gained `localization:=slam` to build that map live
+  with `slam_toolbox`.
+* The mission node no longer fights the controller for the wheels: its stuck
+  recovery only bookkeeps and clears costmaps, leaving `BackUp + Spin` to the
+  tree's `MissionStuck` branch. Stuck detection also counts rotation as progress
+  and waits 12 s instead of 5 s.

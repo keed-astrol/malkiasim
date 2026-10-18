@@ -17,7 +17,8 @@ from launch.actions import (
     SetEnvironmentVariable,
     TimerAction,
 )
-from launch.substitutions import LaunchConfiguration
+from launch.conditions import IfCondition
+from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
 from launch_ros.descriptions import ParameterFile
@@ -44,6 +45,7 @@ def generate_launch_description():
     robot_desc = pkg_robodojo / 'urdf' / 'robodojo.urdf'
     ekf_cfg = pkg_robodojo / 'config' / 'ekf.yaml'
     nav2_cfg = pkg_dojo_nav / 'config' / 'nav2_params.yaml'
+    slam_cfg = pkg_robodojo / 'config' / 'slam.yaml'
     twist_mux_cfg = pkg_dojo_nav / 'config' / 'twist_mux.yaml'
     bt_cfg = pkg_dojo_bt / 'config' / 'dojo_bt_params.yaml'
     rviz_cfg = pkg_dojo_nav / 'config' / 'dojo_nav.rviz'
@@ -105,6 +107,13 @@ def generate_launch_description():
     )
 
     # ─── Nav2 localization and navigation ───────────────────────
+    # localization:=amcl  map_server + AMCL against a prebuilt map (default)
+    # localization:=slam  slam_toolbox builds the map live, no prior map needed
+    use_amcl = PythonExpression(
+        ["'", LaunchConfiguration('localization'), "' == 'amcl'"])
+    use_slam = PythonExpression(
+        ["'", LaunchConfiguration('localization'), "' == 'slam'"])
+
     localization = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             str(
@@ -113,6 +122,7 @@ def generate_launch_description():
                 / 'localization_launch.py'
             )
         ),
+        condition=IfCondition(use_amcl),
         launch_arguments={
             'map': LaunchConfiguration('map'),
             'use_sim_time': 'true',
@@ -120,6 +130,29 @@ def generate_launch_description():
             'autostart': 'true',
         }.items(),
     )
+
+    slam_localization = [
+        Node(
+            package='slam_toolbox',
+            executable='async_slam_toolbox_node',
+            name='slam_toolbox',
+            parameters=[slam_cfg, {'use_sim_time': True}],
+            output='screen',
+            condition=IfCondition(use_slam),
+        ),
+        Node(
+            package='nav2_lifecycle_manager',
+            executable='lifecycle_manager',
+            name='lifecycle_manager_slam',
+            output='screen',
+            condition=IfCondition(use_slam),
+            parameters=[{
+                'use_sim_time': True,
+                'autostart': True,
+                'node_names': ['slam_toolbox'],
+            }],
+        ),
+    ]
 
     nav_remaps = [('/tf', 'tf'), ('/tf_static', 'tf_static')]
 
@@ -250,7 +283,16 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'map',
             default_value=str(default_map),
-            description='Full path to the Nav2 occupancy-grid YAML map.',
+            description='Full path to the Nav2 occupancy-grid YAML map '
+                        '(used when localization:=amcl).',
+        ),
+        DeclareLaunchArgument(
+            'localization',
+            default_value='amcl',
+            choices=['amcl', 'slam'],
+            description='amcl: map_server + AMCL against the map argument. '
+                        'slam: slam_toolbox builds the map live (no map needed, '
+                        'use this for EXPLORE on an unknown arena).',
         ),
         SetEnvironmentVariable(
             name='GZ_SIM_RESOURCE_PATH',
@@ -270,7 +312,7 @@ def generate_launch_description():
         # Start localization, navigation, and autonomous mission after simulator TF exists
         TimerAction(
             period=3.0,
-            actions=[localization, *nav_nodes, autonomous_mission],
+            actions=[localization, *slam_localization, *nav_nodes, autonomous_mission],
         ),
         rviz,
     ])

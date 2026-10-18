@@ -18,7 +18,19 @@ from enum import Enum
 from dataclasses import dataclass, field
 from typing import Optional, List
 from geometry_msgs.msg import PoseStamped
+import math
 import time
+
+
+def _yaw_from_quat(q) -> float:
+    """Yaw (rad) from a geometry_msgs Quaternion."""
+    return math.atan2(2.0 * (q.w * q.z + q.x * q.y),
+                      1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+
+
+def _angle_diff(a: float, b: float) -> float:
+    """Signed shortest angular difference a - b, in [-pi, pi]."""
+    return math.atan2(math.sin(a - b), math.cos(a - b))
 
 
 class MissionState(Enum):
@@ -52,8 +64,9 @@ class MissionContext:
     is_stuck: bool = False
     last_movement_time: float = field(default_factory=time.time)
     last_pose: Optional[PoseStamped] = None
-    stuck_threshold_sec: float = 5.0
-    stuck_distance_threshold: float = 0.05   # meters moved to reset stuck
+    last_yaw: Optional[float] = None
+    stuck_threshold_sec: float = 12.0
+    stuck_distance_threshold: float = 0.08   # meters moved to reset stuck
     recovery_attempts: int = 0
     max_recovery_attempts: int = 3
 
@@ -70,8 +83,14 @@ class MissionStateMachine:
       - /tf          → coordinate transforms
     """
 
-    STUCK_THRESHOLD_SEC = 5.0
-    STUCK_DIST_THRESH = 0.05
+    # "Stuck" is a last resort signal for the behaviour tree, not a knee-jerk
+    # reaction: Nav2's own progress checker already aborts on real lack of
+    # progress. In this arena some time not translating is normal (pivoting to
+    # line up with a doorway, creeping up the ramp), so rotation counts as
+    # progress and the time budget is generous.
+    STUCK_THRESHOLD_SEC = 12.0
+    STUCK_DIST_THRESH = 0.08
+    STUCK_YAW_THRESH = 0.35           # radians of rotation that count as progress
     COLLISION_MIN_RANGE = 0.25        # meters: emergency stop
     COLLISION_WARN_RANGE = 0.50       # meters: slow down
     MAX_RECOVERY_ATTEMPTS = 3
@@ -154,22 +173,31 @@ class MissionStateMachine:
 
     def evaluate_stuck(self, current_pose: PoseStamped) -> bool:
         """
-        Detect if robot hasn't moved significantly since last check.
-        Uses odometry to track displacement and time.
+        Detect if the robot has stopped making progress.
+
+        Movement is measured as translation OR rotation. Rotation matters: a
+        diff drive pivoting to line up with a doorway produces no translation
+        at all, and counting that as "stuck" made the mission node fight the
+        controller (see autonomous_mission_node._handle_recovery).
         """
         now = time.time()
-        if self.ctx.last_pose is None:
+        yaw = _yaw_from_quat(current_pose.pose.orientation)
+
+        if self.ctx.last_pose is None or self.ctx.last_yaw is None:
             self.ctx.last_pose = current_pose
+            self.ctx.last_yaw = yaw
             self.ctx.last_movement_time = now
             return False
 
         dx = current_pose.pose.position.x - self.ctx.last_pose.pose.position.x
         dy = current_pose.pose.position.y - self.ctx.last_pose.pose.position.y
         dist = (dx * dx + dy * dy) ** 0.5
+        dyaw = abs(_angle_diff(yaw, self.ctx.last_yaw))
 
-        if dist >= self.STUCK_DIST_THRESH:
-            # Robot moved, reset timer
+        if dist >= self.STUCK_DIST_THRESH or dyaw >= self.STUCK_YAW_THRESH:
+            # Robot moved (translation or rotation), reset timer
             self.ctx.last_pose = current_pose
+            self.ctx.last_yaw = yaw
             self.ctx.last_movement_time = now
             self.ctx.is_stuck = False
             return False

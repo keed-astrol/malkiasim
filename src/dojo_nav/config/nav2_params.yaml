@@ -95,8 +95,10 @@ controller_server:
 
     progress_checker:
       plugin: "nav2_controller::SimpleProgressChecker"
-      required_movement_radius: 0.3
-      movement_time_allowance: 10.0
+      # Tight squeezes and ramp climbing are slow; 0.3 m in 10 s aborted the
+      # goal mid-manoeuvre and dropped the robot into a recovery/spin loop.
+      required_movement_radius: 0.1
+      movement_time_allowance: 20.0
 
     general_goal_checker:
       stateful: true
@@ -193,11 +195,12 @@ local_costmap:
           raytrace_min_range: 0.0
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        cost_scaling_factor: 3.0
-        # Must be >= the inscribed radius, otherwise there is no gradient at
-        # all. This is a soft preference for the corridor centre; the hard
-        # keep-out is the footprint's inscribed radius.
-        inflation_radius: 0.30
+        # Steep falloff = the robot is willing to pass close to walls. The hard
+        # keep-out is still the footprint's inscribed radius; this only removes
+        # the planner's reluctance, which was making it refuse tight doorways.
+        cost_scaling_factor: 8.0
+        # Must be >= the inscribed radius, otherwise there is no gradient at all.
+        inflation_radius: 0.22
       always_send_full_costmap: true
 
 global_costmap:
@@ -234,8 +237,8 @@ global_costmap:
           raytrace_min_range: 0.0
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        cost_scaling_factor: 3.0
-        inflation_radius: 0.30
+        cost_scaling_factor: 8.0
+        inflation_radius: 0.22
       always_send_full_costmap: true
 
 map_server:
@@ -337,8 +340,11 @@ collision_monitor:
       type: "polygon"
       action_type: "approach"
       footprint_topic: "/local_costmap/published_footprint"
-      time_before_collision: 1.2
-      simulation_time_step: 0.1
+      # Was 1.2 s: at 0.26 m/s that projects the footprint 0.31 m ahead, so in a
+      # ~0.5 m doorway the walls register as a collision and the monitor stops
+      # the robot exactly where it needs to commit and drive through.
+      time_before_collision: 0.5
+      simulation_time_step: 0.05
       min_points: 6
       visualize: false
       enabled: true
