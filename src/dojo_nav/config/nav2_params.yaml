@@ -115,7 +115,20 @@ controller_server:
       yaw_goal_tolerance: 3.15
 
     FollowPath:
-      plugin: "dwb_core::DWBLocalPlanner"
+      # RotationShim wraps DWB: when the path leaves at a big angle, it rotates
+      # in place to face it before driving. Without it DWB only offers forward
+      # arcs, so a rover 0.21 m from the wall it must turn away from gets stopped
+      # by collision_monitor's swept footprint forever (measured: nav.x +0.15
+      # nav.w +0.79 held for 15 s while safe.x/w were 0.00 and the pose never
+      # changed). Turning in place also stops the corner clipping.
+      plugin: "nav2_rotation_shim_controller::RotationShimController"
+      primary_controller: "dwb_core::DWBLocalPlanner"
+      angular_dist_threshold: 0.785        # >45 deg off the path: rotate first
+      angular_disengage_threshold: 0.392   # ...until within 22.5 deg
+      rotate_to_heading_angular_vel: 0.6
+      max_angular_accel: 1.5
+      simulate_ahead_time: 1.0
+      rotate_to_goal_heading: false        # keep the arrival heading
       debug_trajectory_details: false
       min_vel_x: 0.0
       min_vel_y: 0.0
