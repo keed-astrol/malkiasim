@@ -111,19 +111,22 @@ controller_server:
       min_vel_y: 0.0
       max_vel_x: 0.26
       max_vel_y: 0.0
-      max_vel_theta: 1.0
+      # Diff drive: a higher angular limit is what shrinks the turning radius
+      # (radius = v/omega). At 0.26 m/s and 1.0 rad/s the robot needed 0.26 m
+      # of space to turn, which does not fit a 0.5 m maze corner.
+      max_vel_theta: 2.0
       min_speed_xy: 0.0
       max_speed_xy: 0.26
       min_speed_theta: 0.0
       acc_lim_x: 1.0
       acc_lim_y: 0.0
-      acc_lim_theta: 2.0
+      acc_lim_theta: 4.0
       decel_lim_x: -1.0
       decel_lim_y: 0.0
-      decel_lim_theta: -2.0
+      decel_lim_theta: -4.0
       vx_samples: 20
       vy_samples: 1
-      vtheta_samples: 20
+      vtheta_samples: 30
       sim_time: 1.7
       linear_granularity: 0.05
       angular_granularity: 0.025
@@ -163,8 +166,14 @@ local_costmap:
       rolling_window: true
       width: 3
       height: 3
-      resolution: 0.05
-      robot_radius: 0.18
+      # 2.5 cm cells: a ~0.22 m free channel in a 0.5 m corridor is only ~4
+      # cells wide at 5 cm, which is too coarse to turn inside.
+      resolution: 0.025
+      # True footprint from the meshes (base_link 0.271 x 0.236 m, wheels out
+      # to y = +/-0.141), plus a ~2 mm margin. A circumscribed robot_radius of
+      # 0.18 reserved 0.18 m around every wall; the rectangular footprint only
+      # needs its 0.138 m inscribed radius, freeing ~8 cm of corridor width.
+      footprint: "[ [0.138, 0.143], [0.138, -0.143], [-0.138, -0.143], [-0.138, 0.143] ]"
       transform_tolerance: 0.5
       # FIX: ObstacleLayer instead of VoxelLayer, since this is a 2D lidar
       plugins: ["obstacle_layer", "inflation_layer"]
@@ -185,8 +194,10 @@ local_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 3.0
-        # Lower this if the planner refuses to go through narrow maze corridors
-        inflation_radius: 0.10
+        # Must be >= the inscribed radius, otherwise there is no gradient at
+        # all. This is a soft preference for the corridor centre; the hard
+        # keep-out is the footprint's inscribed radius.
+        inflation_radius: 0.30
       always_send_full_costmap: true
 
 global_costmap:
@@ -199,7 +210,7 @@ global_costmap:
       publish_frequency: 1.0
       rolling_window: false
       resolution: 0.05
-      robot_radius: 0.18
+      footprint: "[ [0.138, 0.143], [0.138, -0.143], [-0.138, -0.143], [-0.138, 0.143] ]"
       transform_tolerance: 0.5
       track_unknown_space: true
       plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
@@ -224,7 +235,7 @@ global_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 3.0
-        inflation_radius: 0.10
+        inflation_radius: 0.30
       always_send_full_costmap: true
 
 map_server:
@@ -245,7 +256,9 @@ planner_server:
       plugin: "nav2_navfn_planner::NavfnPlanner"
       tolerance: 0.5
       use_astar: true
-      allow_unknown: true
+      # Must stay false: with allow_unknown true the planner happily routes
+      # through unknown space and drives the robot off the mapped arena.
+      allow_unknown: false
 
 smoother_server:
   ros__parameters:
@@ -281,9 +294,9 @@ behavior_server:
     robot_base_frame: base_footprint
     transform_tolerance: 0.2
     simulate_ahead_time: 2.0
-    max_rotational_vel: 1.0
+    max_rotational_vel: 2.0
     min_rotational_vel: 0.4
-    rotational_acc_lim: 2.0
+    rotational_acc_lim: 4.0
 
 # FIX: the key names were wrong (acceleration/deceleration). Nav2 uses max_accel/max_decel.
 velocity_smoother:
@@ -292,10 +305,10 @@ velocity_smoother:
     smoothing_frequency: 20.0
     scale_velocities: false
     feedback: "OPEN_LOOP"
-    max_velocity: [0.26, 0.0, 1.0]
-    min_velocity: [-0.26, 0.0, -1.0]
-    max_accel: [1.0, 0.0, 2.0]
-    max_decel: [-1.0, 0.0, -2.0]
+    max_velocity: [0.26, 0.0, 2.0]
+    min_velocity: [-0.26, 0.0, -2.0]
+    max_accel: [1.0, 0.0, 4.0]
+    max_decel: [-1.0, 0.0, -4.0]
     odom_topic: "odom"
     odom_duration: 0.1
     deadband_velocity: [0.0, 0.0, 0.0]
