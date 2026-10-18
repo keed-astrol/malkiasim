@@ -133,7 +133,22 @@ def generate_launch_description():
         }.items(),
     )
 
+    # Attitude gate for the mapper: /scan -> /scan_level while level.
+    level_scan_gate = Node(
+        package='dojo_bt',
+        executable='level_scan_gate',
+        name='level_scan_gate',
+        output='screen',
+        condition=IfCondition(use_slam),
+        parameters=[{
+            'use_sim_time': True,
+            'pitch_limit': 2.5,
+        }],
+        remappings=[('/tf', 'tf'), ('/tf_static', 'tf_static')],
+    )
+
     slam_localization = [
+        level_scan_gate,
         Node(
             package='slam_toolbox',
             executable='async_slam_toolbox_node',

@@ -194,6 +194,44 @@ ros2 topic hz /scan                          # want ~15 Hz
 ros2 run tf2_ros tf2_echo odom lidar_link    # the transform the filter waits for
 ```
 
+### Ramps: why the map smeared (and the gate that stops it)
+
+The lidar is a **single horizontal plane** mounted on the chassis. When the
+rover pitches on an arena ramp that plane tilts with it:
+
+* the beams ahead sweep into the ramp/floor, so ranges collapse (the world
+  "teleports closer"),
+* the beams behind lift over the wall, so ranges vanish,
+
+and a 2D scan matcher cannot reconcile either with a planar pose. This is what
+tore the map at the ramps.
+
+`dojo_bt` now runs **`level_scan_gate`**, which reads the IMU orientation and
+forwards `/scan` to `/scan_level` only while the body is within
+`pitch_limit` (2.5°, ~4.4 % grade) of level. `slam_toolbox` subscribes to
+`/scan_level`; while the rover is on a ramp it simply receives no scans for the
+second or two the tilt lasts, EKF odometry carries the pose, and mapping resumes
+on the flat. Nav2 keeps consuming the raw `/scan`, so the collision monitor and
+the costmap obstacle layer behave exactly as before.
+
+```bash
+ros2 topic hz /scan_level                 # ~9 Hz at real_time_factor 0.6
+ros2 param get /level_scan_gate pitch_limit
+```
+
+The gate logs each transition:
+
+```
+[level_scan_gate]: Tilted 6.8 deg - pausing SLAM scans until level
+[level_scan_gate]: Level again - resuming SLAM scans
+```
+
+The alternative (more code, maps *while* climbing) is full attitude
+compensation: project each beam into the lidar frame, rotate by the IMU
+roll/pitch into the gravity-aligned frame, drop points that leave the scan plane
+and re-bin into a synthetic flat scan. The gate is the cheap, robust version and
+loses only a handful of scans per ramp.
+
 Jazzy's `slam_toolbox` also logs
 
 ```
@@ -709,6 +747,10 @@ source install/setup.bash
   translational limit to **0.20 m/s**: at 1 Hz / 0.26 m/s the global path
   flipped between near-equal options in the tight divisions before the
   controller could commit, which read as the rover dithering.
+* The mapper is fed `/scan_level`, produced by `level_scan_gate` from the IMU
+  pitch (2.5° gate). A horizontal 2D lidar on a pitching body sweeps the floor
+  into the beam ahead and over the wall behind, which is what smeared the map at
+  the arena ramps; the gate pauses mapping for the 1-2 s of tilt instead.
 * A full autonomous run mapped the whole arena and it is saved as
   `maps/arena_slam.{pgm,yaml}` (124×65 @ 0.05 m) as a ready-made prior map for
   `localization:=amcl`.
