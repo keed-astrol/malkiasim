@@ -11,7 +11,7 @@ Integrates:
   - /tf                → coordinate transforms
 
 Commands accepted on /dojo_mission (JSON string)
-and translated to Nav2 action goals (NavigateToPose, NavigateThroughPoses).
+and translated to Nav2 NavigateToPose goals (one at a time).
 
 The state machine lives in MissionStateMachine; this node is the ROS2 interface
 that subscribes to sensors, publishes diagnostics, and drives Nav2 actions.
@@ -30,7 +30,7 @@ from rclpy.executors import MultiThreadedExecutor
 from geometry_msgs.msg import PoseStamped, Twist
 from nav_msgs.msg import Odometry, OccupancyGrid
 from sensor_msgs.msg import LaserScan, Imu
-from nav2_msgs.action import NavigateToPose, NavigateThroughPoses
+from nav2_msgs.action import NavigateToPose
 from action_msgs.msg import GoalStatus
 from std_msgs.msg import String
 from rclpy.qos import QoSProfile, DurabilityPolicy
@@ -61,7 +61,6 @@ class AutonomousMissionNode(Node):
 
     Action Clients:
       /navigate_to_pose       (NavigateToPose)
-      /navigate_through_poses (NavigateThroughPoses)
 
     EXPLORE missions pick frontier goals (known-free cells on the border of
     unknown space) from /map, drive to the best one and repeat. That map can
@@ -188,9 +187,6 @@ class AutonomousMissionNode(Node):
         # ─── Action clients ──────────────────────────────────
         self._nav_client = ActionClient(
             self, NavigateToPose, '/navigate_to_pose',
-            callback_group=self._action_cb)
-        self._wp_client = ActionClient(
-            self, NavigateThroughPoses, '/navigate_through_poses',
             callback_group=self._action_cb)
 
         # ─── TF2 ─────────────────────────────────────────────
@@ -361,7 +357,16 @@ class AutonomousMissionNode(Node):
             wps = [p for p in wps if p is not None]
             if wps:
                 self.sm.start_mission(MissionType.WAYPOINT_RUN, waypoints=wps)
-                self._send_waypoint_goal(wps)
+                # One NavigateToPose goal at a time: the next pose is dispatched
+                # from _on_nav_result. Delegating the list to
+                # NavigateThroughPoses put Nav2's through-poses tree in charge,
+                # and its goals reached the planner with an empty frame
+                # ("Failed to transform from  to map", goal (0,0)) so every
+                # waypoint run aborted. Chaining here also gives each waypoint
+                # the same stuck/collision handling as a single goal.
+                self.get_logger().info(
+                    f'Waypoint 1/{len(wps)}')
+                self._send_nav_goal(wps[0])
 
         elif action == 'DOCK':
             pose = self._json_to_pose(cmd.get('dock_pose', {}))
@@ -860,21 +865,6 @@ class AutonomousMissionNode(Node):
         # finishes; the result future has to be chained separately.
         future.add_done_callback(self._on_nav_goal_response)
 
-    def _send_waypoint_goal(self, poses: List[PoseStamped]):
-        """Send a multi-pose goal to Nav2 NavigateThroughPoses action."""
-        if not self._wp_client.wait_for_server(timeout_sec=1.0):
-            self.get_logger().error('NavigateThroughPoses action server not available')
-            return
-
-        goal = NavigateThroughPoses.Goal()
-        goal.poses = poses
-        goal.behavior_tree = ''
-
-        self.get_logger().info(f'Sending Nav2 waypoint goal: {len(poses)} poses')
-
-        future = self._wp_client.send_goal_async(goal)
-        future.add_done_callback(self._on_wp_goal_response)
-
     def _on_nav_goal_response(self, future):
         """Fires when bt_navigator accepts (or rejects) the goal."""
         try:
@@ -921,7 +911,16 @@ class AutonomousMissionNode(Node):
                 # Keep exploring: the next frontier comes from the updated map.
                 self._current_frontier = None
             else:
+                was_waypoints = self.sm.mission_type == MissionType.WAYPOINT_RUN
                 self.sm.complete_current_mission_step()
+                if was_waypoints and self.sm.mission_active:
+                    idx = self.sm.ctx.waypoint_index
+                    wps = self.sm.ctx.waypoints
+                    if 0 <= idx < len(wps):
+                        self.get_logger().info(
+                            f'Waypoint {idx + 1}/{len(wps)}')
+                        self._goal_in_flight = True
+                        self._send_nav_goal(wps[idx])
         else:
             self.get_logger().warn(f'Navigation failed: status={status}')
             self._on_goal_failed(f'status={status}')
@@ -936,32 +935,6 @@ class AutonomousMissionNode(Node):
         elif self.sm.mission_active:
             self.get_logger().warn(f'Mission goal failed ({reason}); cancelling mission')
             self.sm.cancel_mission()
-
-    def _on_wp_goal_response(self, future):
-        """Fires when bt_navigator accepts the waypoint goal."""
-        try:
-            handle = future.result()
-        except Exception as e:
-            self.get_logger().error(f'Waypoint goal request failed: {e}')
-            return
-        if not handle.accepted:
-            self.get_logger().warn('Waypoint goal rejected')
-            self._on_goal_failed('rejected')
-            return
-        handle.get_result_async().add_done_callback(self._on_wp_result)
-
-    def _on_wp_result(self, future):
-        try:
-            status = future.result().status
-        except Exception as e:
-            self.get_logger().error(f'Waypoint result failed: {e}')
-            return
-        if status == GoalStatus.STATUS_SUCCEEDED:
-            self.get_logger().info('Waypoint run complete')
-            self.sm.complete_current_mission_step()
-        else:
-            self.get_logger().warn(f'Waypoint run failed: status={status}')
-            self._on_goal_failed(f'status={status}')
 
     # ─── Status publishing (1 Hz) ────────────────────────────
 
