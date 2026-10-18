@@ -54,9 +54,12 @@ amcl:
     set_initial_pose: true
     always_reset_initial_pose: false
     first_map_only: false
+    # Matches maps/arena_slam2.yaml, whose map origin is the spawn pose (a
+    # SLAM-built map starts at (0,0)). For the shipped maps/arena.yaml, whose
+    # frame is map = world + (2.70, 1.30), use x: 0.20, y: 0.20 instead.
     initial_pose:
-      x: 0.20
-      y: 0.20
+      x: 0.0
+      y: 0.0
       z: 0.0
       yaw: 0.0
 

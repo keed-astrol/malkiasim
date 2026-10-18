@@ -27,13 +27,20 @@ from launch_ros.parameter_descriptions import ParameterValue
 
 
 def _default_map() -> Path:
-    """Locate maps/arena.yaml by walking up from this file (works from
-    src/ and from install/) instead of hardcoding a user-specific path."""
-    for parent in Path(__file__).resolve().parents:
-        candidate = parent / 'maps' / 'arena.yaml'
-        if candidate.is_file():
-            return candidate
-    raise FileNotFoundError('maps/arena.yaml not found above ' + str(Path(__file__).resolve()))
+    """Locate the default prior map by walking up from this file (works from
+    src/ and from install/) instead of hardcoding a user-specific path.
+
+    Prefers maps/arena_slam2.yaml - the map the robot built itself with
+    localization:=slam - and falls back to the curated maps/arena.yaml. Note
+    the AMCL initial_pose in nav2_params.yaml matches arena_slam2 (origin at the
+    spawn); for arena.yaml pass initial_pose.x/y = 0.20, 0.20."""
+    roots = list(Path(__file__).resolve().parents)
+    for name in ('arena_slam2.yaml', 'arena.yaml'):
+        for parent in roots:
+            candidate = parent / 'maps' / name
+            if candidate.is_file():
+                return candidate
+    raise FileNotFoundError('no maps/*.yaml found above ' + str(Path(__file__).resolve()))
 
 
 def generate_launch_description():
