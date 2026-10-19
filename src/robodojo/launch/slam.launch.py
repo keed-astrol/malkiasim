@@ -1,4 +1,4 @@
-#/home/keedastro/dojourdf/src/robodojo/launch/slam.launch.py
+"""Launch SLAM for the RoboDojo gamefield."""
 from pathlib import Path
 
 from ament_index_python.packages import get_package_share_directory
@@ -19,6 +19,12 @@ def generate_launch_description():
     ekf_config = package_share / 'config' / 'ekf.yaml'
 
     return LaunchDescription([
+        # Pin gz-transport discovery to loopback: multicast peer discovery is
+        # unreliable on some hosts (Wi-Fi w/o multicast loopback), which leaves
+        # the GUI unable to find the server (black screen / "no subscriber to
+        # /gazebo/starting_world").
+        SetEnvironmentVariable(name='GZ_IP', value='127.0.0.1'),
+        SetEnvironmentVariable(name='IGN_IP', value='127.0.0.1'),
         SetEnvironmentVariable(
             name='GZ_SIM_RESOURCE_PATH',
             value=f'{package_share.parent}:{gamefield_share / "models"}',
@@ -76,9 +82,9 @@ def generate_launch_description():
             arguments=[
                 '-name', 'robodojo',
                 '-topic', 'robot_description',
-                '-x', '-2.7',
-                '-y', '-1.2',
-                '-z', '0.6',
+                '-x', '-2.50',
+                '-y', '-1.10',
+                '-z', '0.08',
                 '-Y', '0',
             ],
             output='screen',

@@ -17,23 +17,17 @@ bt_navigator:
       plugin: "nav2_bt_navigator::NavigateToPoseNavigator"
     navigate_through_poses:
       plugin: "nav2_bt_navigator::NavigateThroughPosesNavigator"
-    # Custom behavior tree XML — loaded from dojo_bt package share
-    default_bt_xml_filename: "$(find-pkg-share dojo_bt)/behavior_trees/maze/autonomous_maze.xml"
+    # Custom behavior tree XML — loaded from dojo_bt package share.
+    # (default_bt_xml_filename was renamed in Nav2 Galactic; the old name is
+    # silently ignored on Jazzy, so the custom tree never loaded.)
+    default_nav_to_pose_bt_xml: "$(find-pkg-share dojo_bt)/behavior_trees/maze/autonomous_maze.xml"
+    # NavigateThroughPoses uses Nav2's stock tree: our custom tree is written
+    # for NavigateToPose and reads {goal}, which the through-poses action does
+    # not set. Pointing both at it made every waypoint run plan to an empty
+    # frame ("Failed to transform from  to map", goal (0,0)) and abort.
+    default_nav_through_poses_bt_xml: "$(find-pkg-share nav2_bt_navigator)/behavior_trees/navigate_through_poses_w_replanning_and_recovery.xml"
     plugin_lib_names:
       - "dojo_bt_plugins"
-
-# ─── Mission parameters (default values for the BT blackboard) ───
-mission_params:
-  ros__parameters:
-    backup_dist: 0.3
-    backup_speed: 0.15
-    spin_dist: 3.14159
-    collision_min_range: 0.25
-    collision_warn_range: 0.50
-    stuck_threshold_sec: 5.0
-    explore_waypoint_count: 5
-    frontier_min_dist: 0.5
-    max_recovery_attempts: 3
 
 # ─── Extended behavior server config (adds custom behaviors) ───
 behavior_server:

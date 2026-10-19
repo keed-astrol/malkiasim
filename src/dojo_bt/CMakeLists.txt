@@ -70,4 +70,18 @@ install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})
 # --- Python package ---
 install(DIRECTORY ${PROJECT_NAME} DESTINATION share/${PROJECT_NAME})
 
+# --- Python node executables ---
+# NOTE: install(PROGRAMS) copies the files (even with --symlink-install), so
+# edits to these scripts need a `colcon build` before they take effect.
+install(PROGRAMS
+  ${PROJECT_NAME}/autonomous_mission_node.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME autonomous_mission_node
+)
+install(PROGRAMS
+  ${PROJECT_NAME}/level_scan_gate.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME level_scan_gate
+)
+
 ament_package()

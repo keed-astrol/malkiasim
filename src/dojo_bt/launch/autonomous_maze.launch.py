@@ -13,13 +13,34 @@ from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
+    ExecuteProcess,
     IncludeLaunchDescription,
     SetEnvironmentVariable,
     TimerAction,
 )
-from launch.substitutions import LaunchConfiguration
+from launch.conditions import IfCondition
+from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
+from launch_ros.descriptions import ParameterFile
+from launch_ros.parameter_descriptions import ParameterValue
+
+
+def _default_map() -> Path:
+    """Locate the default prior map by walking up from this file (works from
+    src/ and from install/) instead of hardcoding a user-specific path.
+
+    Prefers maps/arena_slam2.yaml - the map the robot built itself with
+    localization:=slam - and falls back to the curated maps/arena.yaml. Note
+    the AMCL initial_pose in nav2_params.yaml matches arena_slam2 (origin at the
+    spawn); for arena.yaml pass initial_pose.x/y = 0.20, 0.20."""
+    roots = list(Path(__file__).resolve().parents)
+    for name in ('arena_slam2.yaml', 'arena.yaml'):
+        for parent in roots:
+            candidate = parent / 'maps' / name
+            if candidate.is_file():
+                return candidate
+    raise FileNotFoundError('no maps/*.yaml found above ' + str(Path(__file__).resolve()))
 
 
 def generate_launch_description():
@@ -33,9 +54,11 @@ def generate_launch_description():
     robot_desc = pkg_robodojo / 'urdf' / 'robodojo.urdf'
     ekf_cfg = pkg_robodojo / 'config' / 'ekf.yaml'
     nav2_cfg = pkg_dojo_nav / 'config' / 'nav2_params.yaml'
+    slam_cfg = pkg_robodojo / 'config' / 'slam.yaml'
+    twist_mux_cfg = pkg_dojo_nav / 'config' / 'twist_mux.yaml'
     bt_cfg = pkg_dojo_bt / 'config' / 'dojo_bt_params.yaml'
     rviz_cfg = pkg_dojo_nav / 'config' / 'dojo_nav.rviz'
-    default_map = Path('/home/keedastro/dojourdf/maps/arena.yaml')
+    default_map = _default_map()
 
     # ─── Gazebo + robot bringup ─────────────────────────────────
     gz_sim = IncludeLaunchDescription(
@@ -75,9 +98,9 @@ def generate_launch_description():
         arguments=[
             '-name', 'robodojo',
             '-topic', 'robot_description',
-            '-x', '-2.7',
-            '-y', '-1.2',
-            '-z', '0.6',
+            '-x', '-2.50',
+            '-y', '-1.10',
+            '-z', '0.08',
             '-Y', '0',
         ],
         output='screen',
@@ -93,6 +116,13 @@ def generate_launch_description():
     )
 
     # ─── Nav2 localization and navigation ───────────────────────
+    # localization:=amcl  map_server + AMCL against a prebuilt map (default)
+    # localization:=slam  slam_toolbox builds the map live, no prior map needed
+    use_amcl = PythonExpression(
+        ["'", LaunchConfiguration('localization'), "' == 'amcl'"])
+    use_slam = PythonExpression(
+        ["'", LaunchConfiguration('localization'), "' == 'slam'"])
+
     localization = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             str(
@@ -101,6 +131,7 @@ def generate_launch_description():
                 / 'localization_launch.py'
             )
         ),
+        condition=IfCondition(use_amcl),
         launch_arguments={
             'map': LaunchConfiguration('map'),
             'use_sim_time': 'true',
@@ -109,10 +140,63 @@ def generate_launch_description():
         }.items(),
     )
 
+    # Attitude gate for the mapper: /scan -> /scan_level while level.
+    level_scan_gate = Node(
+        package='dojo_bt',
+        executable='level_scan_gate',
+        name='level_scan_gate',
+        output='screen',
+        condition=IfCondition(use_slam),
+        parameters=[{
+            'use_sim_time': True,
+            'pitch_limit': 2.5,
+        }],
+        remappings=[('/tf', 'tf'), ('/tf_static', 'tf_static')],
+    )
+
+    slam_localization = [
+        level_scan_gate,
+        Node(
+            package='slam_toolbox',
+            executable='async_slam_toolbox_node',
+            name='slam_toolbox',
+            parameters=[slam_cfg, {'use_sim_time': True}],
+            output='screen',
+            condition=IfCondition(use_slam),
+        ),
+        Node(
+            package='nav2_lifecycle_manager',
+            executable='lifecycle_manager',
+            name='lifecycle_manager_slam',
+            output='screen',
+            condition=IfCondition(use_slam),
+            parameters=[{
+                'use_sim_time': True,
+                'autostart': True,
+                # The bond handshake happens while slam_toolbox's on_activate is
+                # still spinning up the mapper; the default 4 s timer then
+                # expires, the manager aborts bringup and slam_toolbox is left
+                # *inactive* - no /map, no map->odom, so Nav2's costmaps block
+                # on "Invalid frame ID map" and EXPLORE can never start. 0
+                # disables the bond check (the node is in the same launch).
+                'bond_timeout': 0.0,
+                'node_names': ['slam_toolbox'],
+            }],
+        ),
+    ]
+
     nav_remaps = [('/tf', 'tf'), ('/tf_static', 'tf_static')]
 
-    # Merge nav2 params with our BT params
-    nav_params = [str(nav2_cfg), str(bt_cfg), {'use_sim_time': True}]
+    # Merge nav2 params with our BT params.
+    # ParameterFile(allow_substs=True) is required for the
+    # "$(find-pkg-share dojo_bt)/..." path in dojo_bt_params.yaml to be
+    # expanded — plain string paths skip substitution and would be passed
+    # through literally.
+    nav_params = [
+        ParameterFile(str(nav2_cfg), allow_substs=True),
+        ParameterFile(str(bt_cfg), allow_substs=True),
+        {'use_sim_time': True},
+    ]
 
     nav_nodes = [
         Node(
@@ -174,6 +258,17 @@ def generate_launch_description():
             parameters=nav_params,
             remappings=nav_remaps,
         ),
+        # Final velocity arbitration: cmd_vel_safe (navigation) vs
+        # /cmd_vel_emergency (mission e-stop); publishes the winner on cmd_vel
+        # for the Gazebo diff-drive plugin.
+        Node(
+            package='twist_mux',
+            executable='twist_mux',
+            name='twist_mux',
+            output='screen',
+            parameters=[twist_mux_cfg, {'use_sim_time': True}],
+            remappings=[('cmd_vel_out', 'cmd_vel')],
+        ),
         Node(
             package='nav2_lifecycle_manager',
             executable='lifecycle_manager',
@@ -182,6 +277,9 @@ def generate_launch_description():
             parameters=[{
                 'use_sim_time': True,
                 'autostart': True,
+                # Same reason as lifecycle_manager_slam: at real_time_factor 0.6
+                # the 4 s bond window is tight enough to abort a good bringup.
+                'bond_timeout': 0.0,
                 'node_names': [
                     'controller_server',
                     'smoother_server',
@@ -202,10 +300,34 @@ def generate_launch_description():
         executable='autonomous_mission_node',
         name='autonomous_mission_node',
         output='screen',
-        parameters=[bt_cfg, {'use_sim_time': True}],
+        parameters=[
+            bt_cfg,
+            {'use_sim_time': True},
+            # slam mode: start EXPLORE on its own (no /dojo_mission needed).
+            {'localization_mode': LaunchConfiguration('localization')},
+            {'auto_explore': ParameterValue(
+                LaunchConfiguration('auto_explore'), value_type=bool)},
+        ],
     )
 
     # ─── RViz with nav config ───────────────────────────────────
+    # Point the Gazebo GUI camera at the rover, the same as right-clicking the
+    # model and choosing Follow. /gui/follow is a gz-transport service, so it
+    # can only be called once the GUI exists (12 s is well after spawn).
+    follow_camera = TimerAction(
+        period=12.0,
+        actions=[ExecuteProcess(
+            cmd=[
+                'gz', 'service', '-s', '/gui/follow',
+                '--reqtype', 'gz.msgs.StringMsg',
+                '--reptype', 'gz.msgs.Boolean',
+                '--timeout', '4000',
+                '--req', 'data: "robodojo"',
+            ],
+            output='screen',
+        )],
+    )
+
     rviz = Node(
         package='rviz2',
         executable='rviz2',
@@ -219,22 +341,51 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'map',
             default_value=str(default_map),
-            description='Full path to the Nav2 occupancy-grid YAML map.',
+            description='Full path to the Nav2 occupancy-grid YAML map '
+                        '(used when localization:=amcl).',
+        ),
+        DeclareLaunchArgument(
+            'localization',
+            default_value='amcl',
+            choices=['amcl', 'slam'],
+            description='amcl: map_server + AMCL against the map argument. '
+                        'slam: slam_toolbox builds the map live (no map needed, '
+                        'use this for EXPLORE on an unknown arena).',
+        ),
+        DeclareLaunchArgument(
+            'auto_explore',
+            default_value='true',
+            choices=['true', 'false'],
+            description='Start an EXPLORE mission by itself once the map is '
+                        'usable. Only takes effect with localization:=slam; '
+                        'set false to drive to goals by hand (RViz 2D Goal Pose).',
         ),
         SetEnvironmentVariable(
             name='GZ_SIM_RESOURCE_PATH',
             value=f'{pkg_robodojo.parent}:{pkg_gamefield / "models"}',
         ),
+        # Pin gz-transport discovery to loopback: multicast peer discovery is
+        # unreliable on some hosts (Wi-Fi w/o multicast loopback), which leaves
+        # the GUI unable to find the server (black screen / "no subscriber to
+        # /gazebo/starting_world").
+        SetEnvironmentVariable(name='GZ_IP', value='127.0.0.1'),
+        SetEnvironmentVariable(name='IGN_IP', value='127.0.0.1'),
         gz_sim,
         robot_state_pub,
         gz_bridge,
         spawn_robot,
         ekf,
         # Start localization, navigation, and autonomous mission after simulator TF exists
+        # 10 s: at real_time_factor 0.6 the sim clock advances slower than wall
+        # time, and starting the Nav2 lifecycle bringup while Gazebo/SLAM are
+        # still settling can leave planner_server stuck in `configure` (the
+        # manager then blocks and bt_navigator never activates, so every goal is
+        # silently swallowed).
         TimerAction(
-            period=3.0,
-            actions=[localization, *nav_nodes, autonomous_mission],
+            period=10.0,
+            actions=[localization, *slam_localization, *nav_nodes, autonomous_mission],
         ),
+        follow_camera,
         rviz,
     ])
 

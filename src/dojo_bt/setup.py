@@ -28,6 +28,7 @@ setup(
     entry_points={
         'console_scripts': [
             'autonomous_mission_node = dojo_bt.autonomous_mission_node:main',
+            'level_scan_gate = dojo_bt.level_scan_gate:main',
         ],
     },
 )

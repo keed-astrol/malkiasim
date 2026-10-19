@@ -76,11 +76,10 @@
     </visual>
     <collision>
       <origin
-        xyz="0 0 0"
-        rpy="0 0 0" />
+        xyz="0 -0.013 0"
+        rpy="1.5708 0 0" />
       <geometry>
-        <mesh
-          filename="package://robodojo/meshes/front_left_wheel.STL" />
+        <cylinder radius="0.0407" length="0.0383" />
       </geometry>
     </collision>
   </link>
@@ -129,11 +128,10 @@
     </visual>
     <collision>
       <origin
-        xyz="0 0 0"
-        rpy="0 0 0" />
+        xyz="0 0.013 0"
+        rpy="1.5708 0 0" />
       <geometry>
-        <mesh
-          filename="package://robodojo/meshes/front_right_wheel.STL" />
+        <cylinder radius="0.0407" length="0.0383" />
       </geometry>
     </collision>
   </link>
@@ -182,11 +180,10 @@
     </visual>
     <collision>
       <origin
-        xyz="0 0 0"
-        rpy="0 0 0" />
+        xyz="0 -0.013 0"
+        rpy="1.5708 0 0" />
       <geometry>
-        <mesh
-          filename="package://robodojo/meshes/back_left_wheel.STL" />
+        <cylinder radius="0.0407" length="0.0383" />
       </geometry>
     </collision>
   </link>
@@ -235,11 +232,10 @@
     </visual>
     <collision>
       <origin
-        xyz="0 0 0"
-        rpy="0 0 0" />
+        xyz="0 0.0145 0"
+        rpy="1.5708 0 0" />
       <geometry>
-        <mesh
-          filename="package://robodojo/meshes/back_right_wheel.STL" />
+        <cylinder radius="0.0407" length="0.0383" />
       </geometry>
     </collision>
   </link>
@@ -358,14 +354,17 @@
     <left_joint>back_left_wheel_joint</left_joint>
     <right_joint>front_right_wheel_joint</right_joint>
     <right_joint>back_right_wheel_joint</right_joint>
-    <wheel_separation>0.243</wheel_separation>   <!-- verify against CAD -->
-    <wheel_radius>0.0406</wheel_radius>          <!-- verify against CAD -->
+    <wheel_separation>0.2437</wheel_separation>   <!-- measured from wheel joint y-offsets -->
+    <wheel_radius>0.0407</wheel_radius>          <!-- measured from wheel mesh bbox -->
     <topic>/cmd_vel</topic>
     <odom_topic>/odom</odom_topic>
     <frame_id>odom</frame_id>
-    <max_linear_acceleration>0.5</max_linear_acceleration>
-    <max_angular_acceleration>1.0</max_angular_acceleration>
-    <max_angular_velocity>1.0</max_angular_velocity>
+    <!-- Heavily geared-down motors: keep the physics inside what the
+         real drive can do. 0.15 m/s, 0.35 m/s^2, 1.2 rad/s, 1.5 rad/s^2. -->
+    <max_linear_velocity>0.15</max_linear_velocity>
+    <max_linear_acceleration>0.35</max_linear_acceleration>
+    <max_angular_acceleration>1.5</max_angular_acceleration>
+    <max_angular_velocity>1.2</max_angular_velocity>
     <child_frame_id>base_footprint</child_frame_id>
     <odom_publish_frequency>100</odom_publish_frequency>
     <tf_topic>/tf_raw</tf_topic>   <!-- never bridged, so the EKF owns odom TF -->
@@ -391,7 +390,12 @@
       type="gpu_lidar">
       <topic>/scan</topic>
       <gz_frame_id>lidar_link</gz_frame_id>
-      <update_rate>100</update_rate>
+      <!-- 15 Hz, not 100: at 100 Hz the sim was publishing ~34 Hz of 720-ray
+           scans, which starved the CPU (sim fell to ~6% real time), made scan
+           timing bursty, and overflowed slam_toolbox's tf2 MessageFilter queue
+           (scan_queue_size default 1) -> no scan ever reached the mapper ->
+           slam_toolbox published a 0x0 map -> Nav2 rejected it as malformed. -->
+      <update_rate>15</update_rate>
       <ray>
         <scan>
           <horizontal>

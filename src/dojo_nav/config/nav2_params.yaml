@@ -47,10 +47,16 @@ amcl:
     z_short: 0.05
     # FIX: AMCL does not publish map->odom until it has an initial pose.
     # These values must match where the robot spawns, in MAP coordinates.
-    # Spawn is x=-2.7, y=-1.2 in the world; change this if your map origin differs.
+    # Spawn is x=-2.50, y=-1.10 in the world. Aligning maps/arena.pgm against
+    # the arena walls mesh gives map = world + (2.70, 1.30) (rotation 0, 100% of
+    # the map's wall cells within 10 cm of a real wall), so the spawn is
+    # map (0.20, 0.20). Change both together if you move the spawn.
     set_initial_pose: true
     always_reset_initial_pose: false
     first_map_only: false
+    # Matches maps/arena_slam2.yaml, whose map origin is the spawn pose (a
+    # SLAM-built map starts at (0,0)). For the shipped maps/arena.yaml, whose
+    # frame is map = world + (2.70, 1.30), use x: 0.20, y: 0.20 instead.
     initial_pose:
       x: 0.0
       y: 0.0
@@ -95,35 +101,62 @@ controller_server:
 
     progress_checker:
       plugin: "nav2_controller::SimpleProgressChecker"
-      required_movement_radius: 0.3
+      # Tight squeezes and ramp climbing are slow; 0.3 m in 10 s aborted the
+      # goal mid-manoeuvre and dropped the robot into a recovery/spin loop.
+      required_movement_radius: 0.08
       movement_time_allowance: 10.0
 
     general_goal_checker:
       stateful: true
       plugin: "nav2_controller::SimpleGoalChecker"
       xy_goal_tolerance: 0.15
-      yaw_goal_tolerance: 0.25
+      # Any final heading. Spinning on arrival was the worst part of every
+      # manoeuvre: the rover reaches a frontier, pivots (corner clipping a wall
+      # in a 0.42 m corridor), then EXPLORE sends the next frontier with another
+      # heading and it pivots again. Frontier goals do not care which way the
+      # rover ends up facing.
+      yaw_goal_tolerance: 3.15
 
     FollowPath:
-      plugin: "dwb_core::DWBLocalPlanner"
+      # RotationShim wraps DWB: when the path leaves at a big angle, it rotates
+      # in place to face it before driving. Without it DWB only offers forward
+      # arcs, so a rover 0.21 m from the wall it must turn away from gets stopped
+      # by collision_monitor's swept footprint forever (measured: nav.x +0.15
+      # nav.w +0.79 held for 15 s while safe.x/w were 0.00 and the pose never
+      # changed). Turning in place also stops the corner clipping.
+      plugin: "nav2_rotation_shim_controller::RotationShimController"
+      primary_controller: "dwb_core::DWBLocalPlanner"
+      angular_dist_threshold: 0.785        # >45 deg off the path: rotate first
+      angular_disengage_threshold: 0.392   # ...until within 22.5 deg
+      rotate_to_heading_angular_vel: 0.6
+      max_angular_accel: 1.5
+      simulate_ahead_time: 1.0
+      rotate_to_goal_heading: false        # keep the arrival heading
       debug_trajectory_details: false
       min_vel_x: 0.0
       min_vel_y: 0.0
-      max_vel_x: 0.26
+      # 0.20 m/s: the arena corridors are ~0.42 m wide and the rover is 0.28 m,
+      # so there is no room for overshoot. 0.26 m/s made the rover arrive at
+      # gaps too hot, clip them and get wedged (gz then ejects it, which looks
+      # like a teleport). Turning stays fast - that is what shrinks the radius.
+      max_vel_x: 0.15
       max_vel_y: 0.0
-      max_vel_theta: 1.0
+      # Diff drive: a higher angular limit is what shrinks the turning radius
+      # (radius = v/omega). At 0.26 m/s and 1.0 rad/s the robot needed 0.26 m
+      # of space to turn, which does not fit a 0.5 m maze corner.
+      max_vel_theta: 1.2
       min_speed_xy: 0.0
-      max_speed_xy: 0.26
+      max_speed_xy: 0.15
       min_speed_theta: 0.0
-      acc_lim_x: 1.0
+      acc_lim_x: 0.35
       acc_lim_y: 0.0
-      acc_lim_theta: 2.0
-      decel_lim_x: -1.0
+      acc_lim_theta: 1.5
+      decel_lim_x: -0.35
       decel_lim_y: 0.0
-      decel_lim_theta: -2.0
+      decel_lim_theta: -1.5
       vx_samples: 20
       vy_samples: 1
-      vtheta_samples: 20
+      vtheta_samples: 30
       sim_time: 1.7
       linear_granularity: 0.05
       angular_granularity: 0.025
@@ -133,7 +166,9 @@ controller_server:
       short_circuit_trajectory_evaluation: true
       stateful: true
       critics:
-        - "RotateToGoal"
+        # RotateToGoal deliberately absent: it is what spins the rover on
+        # arrival. Combined with yaw_goal_tolerance 3.15 the rover keeps the
+        # heading it arrived with and starts the next leg from there.
         - "Oscillation"
         - "BaseObstacle"
         - "GoalAlign"
@@ -163,8 +198,22 @@ local_costmap:
       rolling_window: true
       width: 3
       height: 3
-      resolution: 0.05
-      robot_radius: 0.18
+      # 2.5 cm cells: a ~0.22 m free channel in a 0.5 m corridor is only ~4
+      # cells wide at 5 cm, which is too coarse to turn inside.
+      resolution: 0.025
+      # Planner footprint = the measured metal, not a shrunken one.
+      # True footprint from the meshes is a 0.271 x 0.236 m body with the wheels
+      # out to y = +/-0.141, i.e. an inscribed radius of 0.136 m.
+      #
+      # An earlier revision planned with 0.115 m to buy channel in the narrow
+      # corridors. Measured on the running stack, that is worse: the planner
+      # happily produced paths through pinches the rover physically cannot pass,
+      # the controller drove in until the collision monitor stopped it, and with
+      # the way ahead fully lethal it could neither pivot nor back out - it sat
+      # there with cmd_vel_nav at 0.116 m/s. A plan the rover cannot execute is
+      # not a plan, so the footprint is now the real one (it may still scrape by
+      # a wheel's width in a 0.30 m gap, but it no longer plans a 0.24 m one).
+      footprint: "[ [0.128, 0.134], [0.128, -0.134], [-0.128, -0.134], [-0.128, 0.134] ]"
       transform_tolerance: 0.5
       # FIX: ObstacleLayer instead of VoxelLayer, since this is a 2D lidar
       plugins: ["obstacle_layer", "inflation_layer"]
@@ -178,15 +227,29 @@ local_costmap:
           clearing: true
           marking: true
           max_obstacle_height: 2.0
-          obstacle_max_range: 2.5
-          obstacle_min_range: 0.0
+          # obstacle_max_range must stay below the distance at which the lidar
+          # sees the FLOOR. The lidar sits 0.1975 m up; the arena's plateau ramps
+          # are 12.3% (7.0 deg), so a pitched robot hits the floor at
+          # 0.1975 / tan(7.0) = 1.61 m. With 2.5 m that painted a phantom
+          # obstacle wall ~1.6 m ahead (a ring in the open), sealing corridors
+          # and making NavFn fail with "failed to create a plan from potential
+          # when a legal potential was found".
+          # 1.2 m leaves headroom up to a 9.3 deg pitch; real walls are still
+          # marked close in, the static map owns the global plan, and the
+          # collision_monitor watches the raw scan for actual collisions.
+          obstacle_max_range: 1.2
+          obstacle_min_range: 0.1
           raytrace_max_range: 3.0
           raytrace_min_range: 0.0
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        cost_scaling_factor: 3.0
-        # Lower this if the planner refuses to go through narrow maze corridors
-        inflation_radius: 0.10
+        # Gentler falloff: 8.0 made the cost gradient negligible next to a wall,
+        # so NavFn hugged whichever wall was shortest. 4.0 keeps the robot near
+        # the middle of a 0.42 m corridor without choking the tight doorways
+        # (the hard keep-out is still the footprint's inscribed radius).
+        cost_scaling_factor: 4.0
+        # Must be >= the inscribed radius, otherwise there is no gradient at all.
+        inflation_radius: 0.22
       always_send_full_costmap: true
 
 global_costmap:
@@ -197,9 +260,18 @@ global_costmap:
       robot_base_frame: base_footprint
       update_frequency: 1.0
       publish_frequency: 1.0
-      rolling_window: false
+      # Rolling window, 8 x 8 m. With a non-rolling costmap the static layer
+      # sizes it to the *last* /map it received; in SLAM mode every frontier
+      # goal sits on the edge of the new map, i.e. one cell outside the costmap,
+      # and the planner rejected it instantly ("worldToMap failed: mx 25, size
+      # 25") so the goal aborted 13 ms after being sent. A window larger than
+      # the 6 x 3 m arena keeps every reachable goal inside it.
+      rolling_window: true
+      width: 16
+      height: 16
       resolution: 0.05
-      robot_radius: 0.18
+      # Planner footprint - the measured metal; see local_costmap above.
+      footprint: "[ [0.128, 0.134], [0.128, -0.134], [-0.128, -0.134], [-0.128, 0.134] ]"
       transform_tolerance: 0.5
       track_unknown_space: true
       plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
@@ -217,21 +289,25 @@ global_costmap:
           clearing: true
           marking: true
           max_obstacle_height: 2.0
-          obstacle_max_range: 2.5
-          obstacle_min_range: 0.0
+          # Kept equal to the local costmap: floor returns from the plateau ramps
+          # are phantom obstacles in the global plan too (see local_costmap).
+          obstacle_max_range: 1.2
+          obstacle_min_range: 0.1
           raytrace_max_range: 3.0
           raytrace_min_range: 0.0
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        cost_scaling_factor: 3.0
-        inflation_radius: 0.10
+        cost_scaling_factor: 8.0
+        inflation_radius: 0.22
       always_send_full_costmap: true
 
 map_server:
   ros__parameters:
     use_sim_time: true
-    # FIX: was empty, so no map loaded
-    yaml_filename: "/home/keedastro/dojourdf/maps/arena.yaml"
+    # The map is supplied at launch time by the 'map' launch argument
+    # (navigate.launch.py / autonomous_maze.launch.py default to
+    # maps/arena.yaml in this repository), which overrides yaml_filename.
+    # Do not hard-code a user-specific absolute path here.
 
 planner_server:
   ros__parameters:
@@ -243,7 +319,9 @@ planner_server:
       plugin: "nav2_navfn_planner::NavfnPlanner"
       tolerance: 0.5
       use_astar: true
-      allow_unknown: true
+      # Must stay false: with allow_unknown true the planner happily routes
+      # through unknown space and drives the robot off the mapped arena.
+      allow_unknown: false
 
 smoother_server:
   ros__parameters:
@@ -264,6 +342,11 @@ behavior_server:
     global_footprint_topic: global_costmap/published_footprint
     cycle_frequency: 10.0
     enable_stamped_cmd_vel: false
+    # Route BackUp/Spin through the controller chain instead of straight to
+    # /cmd_vel (the default), so the velocity smoother and the collision
+    # monitor still arbitrate them. Otherwise a recovery BackUp drives blind
+    # and can reverse into a wall.
+    cmd_vel_topic: cmd_vel_nav
     behavior_plugins: ["spin", "backup", "drive_on_heading", "wait"]
     # FIX: '::' instead of '/'
     spin:
@@ -279,9 +362,9 @@ behavior_server:
     robot_base_frame: base_footprint
     transform_tolerance: 0.2
     simulate_ahead_time: 2.0
-    max_rotational_vel: 1.0
-    min_rotational_vel: 0.4
-    rotational_acc_lim: 2.0
+    max_rotational_vel: 1.2
+    min_rotational_vel: 0.25
+    rotational_acc_lim: 1.5
 
 # FIX: the key names were wrong (acceleration/deceleration). Nav2 uses max_accel/max_decel.
 velocity_smoother:
@@ -290,10 +373,10 @@ velocity_smoother:
     smoothing_frequency: 20.0
     scale_velocities: false
     feedback: "OPEN_LOOP"
-    max_velocity: [0.26, 0.0, 1.0]
-    min_velocity: [-0.26, 0.0, -1.0]
-    max_accel: [1.0, 0.0, 2.0]
-    max_decel: [-1.0, 0.0, -2.0]
+    max_velocity: [0.15, 0.0, 1.2]
+    min_velocity: [-0.15, 0.0, -1.2]
+    max_accel: [0.35, 0.0, 1.5]
+    max_decel: [-0.35, 0.0, -1.5]
     odom_topic: "odom"
     odom_duration: 0.1
     deadband_velocity: [0.0, 0.0, 0.0]
@@ -301,14 +384,16 @@ velocity_smoother:
     enable_stamped_cmd_vel: false
 
 # Chain: controller -> cmd_vel_nav -> velocity_smoother -> cmd_vel_smoothed
-#        -> collision_monitor -> cmd_vel -> Gazebo diff drive
+#        -> collision_monitor -> cmd_vel_safe
+#        -> twist_mux (+ /cmd_vel_emergency, high priority) -> cmd_vel
+#        -> Gazebo diff drive
 collision_monitor:
   ros__parameters:
     use_sim_time: true
     base_frame_id: "base_footprint"
     odom_frame_id: "odom"
     cmd_vel_in_topic: "cmd_vel_smoothed"
-    cmd_vel_out_topic: "cmd_vel"
+    cmd_vel_out_topic: "cmd_vel_safe"
     state_topic: "collision_monitor_state"
     enable_stamped_cmd_vel: false
     transform_tolerance: 0.5
@@ -319,9 +404,16 @@ collision_monitor:
     FootprintApproach:
       type: "polygon"
       action_type: "approach"
-      footprint_topic: "/local_costmap/published_footprint"
-      time_before_collision: 1.2
-      simulation_time_step: 0.1
+      # NOT footprint_topic: that would follow the shrunken planner footprint
+      # above and quietly make the emergency stop optimistic. This is the true
+      # footprint (base_link 0.271 x 0.236 m, wheels to +/-0.141) plus ~5 mm,
+      # so the last-resort guard still believes the rover is as wide as it is.
+      points: "[ [0.145, 0.150], [0.145, -0.150], [-0.145, -0.150], [-0.145, 0.150] ]"
+      # Was 1.2 s: at 0.26 m/s that projects the footprint 0.31 m ahead, so in a
+      # ~0.5 m doorway the walls register as a collision and the monitor stops
+      # the robot exactly where it needs to commit and drive through.
+      time_before_collision: 0.5
+      simulation_time_step: 0.05
       min_points: 6
       visualize: false
       enabled: true
@@ -389,15 +481,3 @@ docking_server:
       projection_time: 5.0
       simulation_step: 0.1
       dock_collision_threshold: 0.3
-
-# Not used for maze navigation, but navigation_launch.py always starts this node.
-# graph_filepath must point at a real graph file. This placeholder is the sample
-# graph that ships with Nav2. Change "kilted" to your ROS distro name.
-route_server:
-  ros__parameters:
-    use_sim_time: true
-    base_frame: "base_footprint"
-    route_frame: "map"
-    path_density: 0.05
-    max_iterations: 0
-    graph_filepath: "/opt/ros/kilted/share/nav2_route/graphs/aws_graph.geojson"

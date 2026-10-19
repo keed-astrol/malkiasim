@@ -1,6 +1,16 @@
 <?xml version="1.0" ?>
 <sdf version="1.9">
   <world name="auto_arena">
+  <!-- Throttle the simulation clock: physics runs at 60% of real time so the
+       rover's inertia and the controller's corrections are easy to follow on
+       screen. max_step_size is unchanged, so the dynamics are identical - only
+       the wall-clock speed of the world changes. -->
+  <physics name="default_physics" type="ignored">
+    <max_step_size>0.001</max_step_size>
+    <real_time_factor>0.6</real_time_factor>
+  </physics>
+
+
 
     <plugin
       filename="gz-sim-physics-system"

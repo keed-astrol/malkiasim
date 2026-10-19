@@ -8,7 +8,6 @@
 
 #include <string>
 #include <cmath>
-#include <jsoncpp/json/json.h>
 
 #include "behaviortree_cpp/bt_factory.h"
 
@@ -47,9 +46,10 @@ IdleState::IdleState(const std::string & name,
                      const BT::NodeConfig & config)
   : BT::StatefulActionNode(name, config)
 {
-  node_ = config.blackboard->get<rclcpp::Node::SharedPtr>("node");
-  if (node_) {
-    cmd_vel_pub_ = node_->create_publisher<geometry_msgs::msg::Twist>("/cmd_vel_emergency", 10);
+  init_mission_state_listener(config);
+  auto node = config.blackboard->get<rclcpp::Node::SharedPtr>("node");
+  if (node) {
+    cmd_vel_pub_ = node->create_publisher<geometry_msgs::msg::Twist>("/cmd_vel_emergency", 10);
   }
 }
 
@@ -69,21 +69,10 @@ BT::NodeStatus IdleState::onStart()
 
 BT::NodeStatus IdleState::onRunning()
 {
-  // Stay in idle until a mission command arrives
-  // The blackboard "mission_active" flag is updated by autonomous_mission_node
-  std::string state_json;
-  if (config().blackboard->get("mission_state", state_json)) {
-    try {
-      Json::Value root;
-      Json::Reader reader;
-      if (reader.parse(state_json, root)) {
-        if (root.get("mission_active", false).asBool()) {
-          return BT::NodeStatus::SUCCESS;
-        }
-      }
-    } catch (...) {}
+  // Hold still until the mission node reports that a mission is active.
+  if (mission_active()) {
+    return BT::NodeStatus::SUCCESS;
   }
-  // Publish zero velocity to stay put
   if (cmd_vel_pub_) {
     geometry_msgs::msg::Twist stop;
     cmd_vel_pub_->publish(stop);
@@ -127,21 +116,22 @@ BT::NodeStatus ComputeFrontiers::tick()
   return BT::NodeStatus::SUCCESS;
 }
 
-// ─── DockRobot ─────────────────────────────────────────────
+// ─── MissionDock ───────────────────────────────────────────
+// (registered as "MissionDock" to avoid colliding with Nav2's DockRobot)
 
-DockRobot::DockRobot(const std::string & name,
-                     const BT::NodeConfig & config)
+MissionDock::MissionDock(const std::string & name,
+                         const BT::NodeConfig & config)
   : BT::SyncActionNode(name, config)
 {
   node_ = config.blackboard->get<rclcpp::Node::SharedPtr>("node");
 }
 
-BT::PortsList DockRobot::providedPorts()
+BT::PortsList MissionDock::providedPorts()
 {
   return {};
 }
 
-BT::NodeStatus DockRobot::tick()
+BT::NodeStatus MissionDock::tick()
 {
   // Stub: final docking approach would happen here.
   // In a full implementation, this would:
@@ -163,9 +153,9 @@ BT_REGISTER_NODES(factory)
   factory.registerNodeType<dojo_bt::EmergencyStop>("EmergencyStop");
   factory.registerNodeType<dojo_bt::IdleState>("IdleState");
   factory.registerNodeType<dojo_bt::ComputeFrontiers>("ComputeFrontiers");
-  factory.registerNodeType<dojo_bt::DockRobot>("DockRobot");
+  factory.registerNodeType<dojo_bt::MissionDock>("MissionDock");
   factory.registerNodeType<dojo_bt::IsMissionActive>("IsMissionActive");
   factory.registerNodeType<dojo_bt::IsMissionType>("IsMissionType");
   factory.registerNodeType<dojo_bt::IsCollisionImminent>("IsCollisionImminent");
-  factory.registerNodeType<dojo_bt::IsStuck>("IsStuck");
+  factory.registerNodeType<dojo_bt::MissionStuck>("MissionStuck");
 }

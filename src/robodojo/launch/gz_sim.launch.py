@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 from ament_index_python.packages import get_package_share_directory
@@ -16,9 +17,27 @@ def generate_launch_description():
     rviz_config = package_share / 'config' / 'robodojo.rviz'
 
     return LaunchDescription([
+        # gz-transport peer discovery via UDP multicast is unreliable on some
+        # hosts (e.g. Wi-Fi interfaces without multicast loopback), which leaves
+        # the GUI unable to find the server ("no subscriber to
+        # /gazebo/starting_world", black screen). GUI + server are always local,
+        # so pin discovery to loopback instead.
+        SetEnvironmentVariable(name='GZ_IP', value='127.0.0.1'),
+        SetEnvironmentVariable(name='IGN_IP', value='127.0.0.1'),
+        # Append to any pre-existing value instead of clobbering it, and include
+        # both the share dirs (for package:// URIs) and the gamefield models
+        # dir (for model://gamefield_arena).
         SetEnvironmentVariable(
             name='GZ_SIM_RESOURCE_PATH',
-            value=f'{package_share.parent}:{gamefield_share / "models"}',
+            value=os.pathsep.join(
+                p
+                for p in (
+                    os.environ.get('GZ_SIM_RESOURCE_PATH', ''),
+                    str(package_share.parent),
+                    str(gamefield_share / 'models'),
+                )
+                if p
+            ),
         ),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(
@@ -73,9 +92,9 @@ def generate_launch_description():
             arguments=[
                 '-name', 'robodojo',
                 '-topic', 'robot_description',
-                '-x', '-2.7',
-                '-y', '-1.2',
-                '-z', '0.6',
+                '-x', '-2.50',
+                '-y', '-1.10',
+                '-z', '0.08',
                 '-Y', '0',
             ],
             output='screen',

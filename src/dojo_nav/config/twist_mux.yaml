@@ -1,0 +1,24 @@
+# twist_mux — arbitrates velocity commands so the RoboDojo emergency stop and
+# mission recovery always win over Nav2 path following.
+#
+# Full command chain:
+#   controller_server   -> cmd_vel_nav
+#   velocity_smoother   -> cmd_vel_smoothed
+#   collision_monitor   -> cmd_vel_safe       (mux input, priority 10)
+#   /cmd_vel_emergency  -> mission node e-stop (mux input, priority 100)
+#   twist_mux           -> cmd_vel            (mux output -> Gazebo diff drive)
+#
+# Note: Nav2 Jazzy can publish TwistStamped, but every stage of this stack sets
+# enable_stamped_cmd_vel: false, so twist_mux must mux plain geometry_msgs/Twist.
+twist_mux:
+  ros__parameters:
+    use_stamped: false
+    topics:
+      navigation:
+        topic: cmd_vel_safe
+        timeout: 0.5
+        priority: 10
+      emergency:
+        topic: cmd_vel_emergency
+        timeout: 0.5
+        priority: 100

@@ -1,187 +1,92 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<root BTCPP_format="4">
+<root BTCPP_format="4" main_tree_to_execute="MainTree">
+
   <!--
-    Autonomous Maze Navigation Behavior Tree for RoboDojo
-    ======================================================
-    States:
-      IDLE          - Wait for mission command
-      EXPLORE       - Map frontier exploration via waypoints
-      NAV_TO_GOAL   - Navigate to a single user-defined pose
-      WAYPOINT_RUN  - Navigate through a sequence of poses
-      RECOVER       - Spin / backup recovery when stuck
-      DOCK          - Return to home / charging dock
-      EMERGENCY     - Collision imminent; stop and back up
+    RoboDojo autonomous navigation tree (Nav2 / BehaviorTree.CPP v4).
 
-    Sensor inputs used:
-      - /scan (LIDAR)       → obstacle detection, frontier identification
-      - /odom (wheel enc)   → odometry for local positioning
-      - /imu                → yaw rate + absolute heading
-      - /odometry/filtered  → EKF-fused odometry (used by Nav2)
-      - /map                → SLAM global map
-      - /tf                 → transforms: map→odom→base_footprint
+    Loaded by nav2_bt_navigator as the default NavigateToPose tree. It drives
+    Nav2's planning + control pipeline and layers RoboDojo safety on top:
 
-    This tree is loaded by nav2_bt_navigator as a plugin-based
-    replacement/extension of the default Nav2 navigate trees.
+      ComputePathToPose  ->  FollowPath (with replanning at 0.3 Hz)
+        * Safety: the collision_monitor stops the wheels for the real swept
+          footprint. The tree only reacts when a step fails; the mission node
+          keeps a short reverse escape for a wedged rover.
+      Recovery (runs only when a goal step fails)
+        * stuck  (mission node "is_stuck")  -> back up + spin
+        * collision imminent                -> back up + wait
+        * otherwise                         -> clear costmaps / spin / wait
+
+    The mission "brain" (EXPLORE / NAV_TO_GOAL / WAYPOINT_RUN / DOCK, frontier
+    selection, goal sequencing, /cmd_vel_emergency manoeuvres) lives in
+    autonomous_mission_node. That node drives this tree through the standard
+    NavigateToPose / NavigateThroughPoses actions, so the tree only has to reach
+    the goal placed on the {goal} blackboard by the navigator.
+
+    Custom node IDs provided by dojo_bt_plugins:
+      IsCollisionImminent, MissionStuck, EmergencyStop
+    (MissionStuck is deliberately not named "IsStuck": Nav2 already registers an
+     IsStuck condition and BehaviorTree.CPP throws on duplicate IDs.)
   -->
 
-  <BehaviorTree ID="AutonomousMazeTree">
+  <BehaviorTree ID="MainTree">
+    <RecoveryNode number_of_retries="6" name="NavigateToPoseRecovery">
+      <PipelineSequence name="NavigateWithReplanning">
 
-    <!-- ─── control parameters (set by autonomous_mission_node) ─── -->
-    <SubTree ID="MissionParams" />
+        <!-- Replan at 0.3 Hz while following. Faster replanning made the path
+             flip between near-equal options in the tight divisions before the
+             controller could commit, which read as the rover dithering; 0.3 Hz
+             gives it 3.3 s (about 0.5 m at 0.15 m/s) on one path. -->
+        <RateController hz="0.3">
+          <RecoveryNode number_of_retries="1" name="ComputePathToPose">
+            <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased"/>
+            <ClearEntireCostmap name="ClearGlobalCostmap-Context"
+                                service_name="global_costmap/clear_entirely_global_costmap"/>
+          </RecoveryNode>
+        </RateController>
 
-    <!-- ─── ROOT: Repeat forever, reactivating on each new mission ─── -->
-    <Sequence name="MissionRoot">
+        <!-- Follow the path. Deliberately NOT gated on IsCollisionImminent:
+             withholding every controller command while anything was within
+             0.25 m of the front cone also blocked rotation in place, so in a
+             tight arena the rover could not even start turning. The
+             collision_monitor enforces the real (swept) footprint, and the
+             recovery branch below still uses IsCollisionImminent to decide to
+             reverse out. -->
+        <RecoveryNode number_of_retries="1" name="CollisionSafeFollowPath">
+          <Sequence name="GuardedFollowPath">
+            <FollowPath path="{path}"
+                        controller_id="FollowPath"
+                        goal_checker_id="general_goal_checker"/>
+          </Sequence>
+          <ClearEntireCostmap name="ClearLocalCostmap-Context"
+                              service_name="local_costmap/clear_entirely_local_costmap"/>
+        </RecoveryNode>
 
-      <!-- ─── SAFETY GATE: abort everything if collision imminent ─── -->
-      <Fallback name="EmergencyGate">
-        <!-- If collision is imminent, stop and back up immediately -->
-        <Sequence name="CollisionStop">
-          <Condition ID="IsCollisionImminent" name="CheckCollision" />
-          <Action ID="EmergencyStop" name="EmergencyBrake" />
-          <Action ID="BackUp" name="BackOut">
-            <backup_dist>{backup_dist}</backup_dist>
-            <backup_speed>{backup_speed}</backup_speed>
-          </Action>
+      </PipelineSequence>
+
+      <!-- Recovery: pick a strategy based on why we lost the goal. The generic
+           RoundRobin always eventually succeeds so the outer retry loop keeps
+           replanning instead of aborting the goal. -->
+      <Fallback name="RecoveryStrategy">
+        <Sequence name="StuckRecovery">
+          <MissionStuck/>
+          <BackUp backup_dist="0.10" backup_speed="0.06"/>
+          <Spin spin_dist="1.57"/>
         </Sequence>
-
-        <!-- ─── MAIN MISSION SEQUENCE ─── -->
-        <Fallback name="MissionSequence">
-          <!--
-            Fallback: try the active mission type.
-            If any step fails, we fall into recovery.
-          -->
-
-          <!-- Check what mission type is active and route accordingly -->
-          <Sequence name="IdleWait">
-            <Condition ID="IsMissionActive" name="MissionActive?">
-              <expected>false</expected>
-            </Condition>
-            <Action ID="IdleState" name="Idle">
-              <topic>cmd_vel</topic>
-            </Action>
-          </Sequence>
-
-          <!-- EXPLORE: map frontiers -->
-          <Sequence name="ExploreSequence">
-            <Condition ID="IsMissionType" name="Type==EXPLORE?">
-              <mission_type>EXPLORE</mission_type>
-            </Condition>
-            <Action ID="ComputeFrontiers" name="CalcFrontiers">
-              <scan_topic>/scan</scan_topic>
-              <map_topic>/map</map_topic>
-              <global_frame>map</global_frame>
-            </Action>
-            <Action ID="NavigateToFrontier" name="GoToFrontier">
-              <controller_id>FollowPath</controller_id>
-              <goal_checker_id>general_goal_checker</goal_checker_id>
-            </Action>
-          </Sequence>
-
-          <!-- NAV_TO_GOAL: single pose -->
-          <Sequence name="NavToGoalSequence">
-            <Condition ID="IsMissionType" name="Type==GOAL?">
-              <mission_type>NAV_TO_GOAL</mission_type>
-            </Condition>
-            <Action ID="NavigateToPose" name="GoToGoal">
-              <controller_id>FollowPath</controller_id>
-              <goal_checker_id>general_goal_checker</goal_checker_id>
-            </Action>
-          </Sequence>
-
-          <!-- WAYPOINT_RUN: multi-pose sequence -->
-          <Sequence name="WaypointSequence">
-            <Condition ID="IsMissionType" name="Type==WAYPOINT?">
-              <mission_type>WAYPOINT_RUN</mission_type>
-            </Condition>
-            <Action ID="NavigateThroughPoses" name="FollowWaypoints">
-              <controller_id>FollowPath</controller_id>
-              <goal_checker_id>general_goal_checker</goal_checker_id>
-            </Action>
-          </Sequence>
-
-          <!-- DOCK: return to home -->
-          <Sequence name="DockSequence">
-            <Condition ID="IsMissionType" name="Type==DOCK?">
-              <mission_type>DOCK</mission_type>
-            </Condition>
-            <Action ID="NavigateToPose" name="GoToDock">
-              <controller_id>FollowPath</controller_id>
-              <goal_checker_id>general_goal_checker</goal_checker_id>
-            </Action>
-            <Action ID="DockRobot" name="FinalApproach" />
-          </Sequence>
-
-          <!-- Default: unknown mission type, go idle -->
-          <Action ID="IdleState" name="DefaultIdle">
-            <topic>cmd_vel</topic>
-          </Action>
-        </Fallback>
+        <Sequence name="CollisionRecovery">
+          <IsCollisionImminent/>
+          <BackUp backup_dist="0.12" backup_speed="0.06"/>
+          <Wait wait_duration="1.0"/>
+        </Sequence>
+        <RoundRobin name="GenericRecovery">
+          <ClearEntireCostmap name="ClearLocalCostmap-Recovery"
+                              service_name="local_costmap/clear_entirely_local_costmap"/>
+          <ClearEntireCostmap name="ClearGlobalCostmap-Recovery"
+                              service_name="global_costmap/clear_entirely_global_costmap"/>
+          <Spin spin_dist="1.57"/>
+          <Wait wait_duration="1.0"/>
+        </RoundRobin>
       </Fallback>
 
-      <!-- ─── RECOVERY: only reached when a mission step fails ─── -->
-      <Fallback name="RecoveryGate">
-        <!-- Try spin recovery first (for minor stuck situations) -->
-        <Sequence name="SpinRecovery">
-          <Condition ID="IsStuck" name="AmIStuck?">
-            <stuck_threshold_sec>5.0</stuck_threshold_sec>
-          </Condition>
-          <Action ID="Spin" name="Spin360">
-            <spin_dist>3.14159</spin_dist>
-            <is_recovery>true</is_recovery>
-          </Action>
-        </Sequence>
-
-        <!-- Then try backup + retry -->
-        <Sequence name="BackupRecovery">
-          <Action ID="BackUp" name="BackAway">
-            <backup_dist>{backup_dist}</backup_dist>
-            <backup_speed>{backup_speed}</backup_speed>
-          </Action>
-          <Action ID="Wait" name="Settle">
-            <wait_duration>1.0</wait_duration>
-          </Action>
-        </Sequence>
-
-        <!-- Last resort: clear costmaps, replan -->
-        <Sequence name="ClearCostmapRecovery">
-          <Action ID="ClearEntireCostmap" name="ClearMaps">
-            <service_name>local_costmap/clear_entirely_local_costmap</service_name>
-          </Action>
-          <Action ID="ClearEntireCostmap" name="ClearGlobal">
-            <service_name>global_costmap/clear_entirely_global_costmap</service_name>
-          </Action>
-          <Action ID="Wait" name="ReplanWait">
-            <wait_duration>0.5</wait_duration>
-          </Action>
-        </Sequence>
-
-      </Fallback>
-    </Sequence>
+    </RecoveryNode>
   </BehaviorTree>
-
-  <!--
-    Subtree: MissionParams
-    Injected at runtime by autonomous_mission_node as blackboard entries
-    that configure mission type, goal poses, and thresholds.
-  -->
-  <BehaviorTree ID="MissionParams">
-    <Sequence>
-      <!-- these ports are populated via blackboard before the tree ticks -->
-      <SubTree ID="BlackboardIntCheck" _skipIf="true" />
-    </Sequence>
-  </BehaviorTree>
-
-  <!--
-    Description of custom condition/action plugins used above:
-    ===========================================================
-    IsCollisionImminent  - checks LIDAR scan for obstacle within safety radius
-    IsMissionActive      - checks blackboard for active mission flag
-    IsMissionType        - checks blackboard mission_type against expected
-    IsStuck              - checks if robot hasn't moved significantly in N seconds
-    EmergencyStop        - publishes zero cmd_vel immediately
-    IdleState            - holds robot stationary, waits for mission command
-    ComputeFrontiers     - analyzes map+scan for unexplored frontiers
-    NavigateToFrontier   - sends frontier pose as Nav2 goal
-    DockRobot            - final low-speed approach to dock
-  -->
 </root>

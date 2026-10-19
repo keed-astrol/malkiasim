@@ -14,9 +14,13 @@ slam_toolbox:
     base_frame: base_footprint
     odom_frame: odom
     map_frame: map
-    scan_topic: /scan
+    # /scan_level comes from dojo_bt level_scan_gate, which only forwards scans
+    # while the body is level (IMU pitch within 2.5 deg). On a ramp the tilted
+    # lidar plane sweeps the floor into the beam and the far wall out of it, so
+    # feeding those scans to a 2D matcher is what smeared the map.
+    scan_topic: /scan_level
     mode: mapping
-    debug_logging: true
+    debug_logging: false
     throttle_scans: 1
     enable_interactive_mode: true
 
@@ -24,33 +28,56 @@ slam_toolbox:
     resolution: 0.05
     map_update_interval: 1.0
     transform_publish_period: 0.02
+    # Stamp map->odom with "now" instead of "last scan time + transform_timeout".
+    # level_scan_gate deliberately stops sending scans while the rover is tilted
+    # on a ramp; with restamp_tf false the published transform then freezes at
+    # the last scan's time (observed: 44.19 s while the clock was at 124 s), and
+    # every Nav2 transform lookup fails - the rover freezes part-way up the ramp.
+    restamp_tf: true
 
     # Laser params
-    min_laser_range: 0.15 # lidar min is 0.1; drop the closest returns
-    max_laser_range: 12.0 # long grazing-angle hits cause speckle
-    minimum_time_interval: 0.02 # lidar runs at 10 Hz
-    transform_timeout: 0.2
+    min_laser_range: 0.15          # lidar min is 0.1; drop the closest returns
+    max_laser_range: 8.0          # long grazing-angle hits cause speckle
+    # 2 scans/s. This is the only brake on mapping while the rover is stalled
+    # (minimum_travel_distance is 0 so a parked rover still bootstraps a map);
+    # at 5 scans/s a rover pushing a wall smeared the map badly.
+    minimum_time_interval: 0.5
+    # slam_toolbox subscribes through a tf2 MessageFilter that queues scans until
+    # the odom -> lidar_link transform for their stamp exists. The defaults
+    # (scan_queue_size 1, transform_timeout 0.2) are too tight when the EKF is
+    # still catching up with a 15 Hz scan stream, so give the filter some slack.
+    scan_queue_size: 20
+    transform_timeout: 0.5
     tf_buffer_duration: 30.0
     stack_size_to_use: 40000000
 
     # Scan matching
     use_scan_matching: true
     use_scan_barycenter: true
-    minimum_travel_distance: 0.5
-    minimum_travel_heading: 0.5
-    scan_buffer_size: 10
+    # A parked rover must still build a map. shouldProcessScan() only adds a
+    # scan after the robot has travelled 0.8 * minimum_travel_distance; the
+    # single "first measurement" pass does not reach the published grid (a
+    # parked rover's /map stays 0x0 even after a minute of scans). An empty
+    # /map is rejected by Nav2 as malformed and leaves EXPLORE with no
+    # frontiers, so accept scans on the time interval instead of on travel.
+    minimum_travel_distance: 0.0
+    minimum_travel_heading: 0.1
+    scan_buffer_size: 1000
     scan_buffer_maximum_scan_distance: 10.0
-    link_match_minimum_response_fine: 0.1  
+    link_match_minimum_response_fine: 0.1
     link_scan_maximum_distance: 1.5
+
+    # Loop closure: OFF. The arena is 6 x 3 m and a session is a few minutes, so
+    # there is nothing to close; a single false closure searches an 8 m space
+    # and *rotates the whole map* (observed: the saved map came out tilted with
+    # duplicated walls). Without it the pose drifts slowly but stays locally
+    # consistent, which is what the planner and costmap need.
+    do_loop_closing: false
     loop_search_maximum_distance: 3.0
-    do_loop_closing: true 
-    loop_match_minimum_chain_size: 10           
-    loop_match_maximum_variance_coarse: 3.0  
-    loop_match_minimum_response_coarse: 0.35    
-    loop_match_minimum_response_fine: 0.45
-
-
-    # Loop closure
+    loop_match_minimum_chain_size: 10
+    loop_match_maximum_variance_coarse: 3.0
+    loop_match_minimum_response_coarse: 0.30
+    loop_match_minimum_response_fine: 0.40
     loop_search_space_dimension: 8.0
     loop_search_space_resolution: 0.05
     loop_search_space_smear_deviation: 0.03
@@ -69,4 +96,3 @@ slam_toolbox:
     minimum_angle_penalty: 0.9
     minimum_distance_penalty: 0.5
     use_response_expansion: true
-      
